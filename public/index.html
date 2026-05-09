@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DailyPilot</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <div>
+          <p class="eyebrow">DailyPilot</p>
+          <h1>目標スケジュール・実績・振り返りを1画面で作成</h1>
+          <p>テキストで管理していたS/A/Bタスク、1日の予定、達成率、理由、改善点をそのまま出力できます。</p>
+        </div>
+        <label class="datePicker">対象日<input id="date" type="date" /></label>
+      </header>
+
+      <div id="toast" class="toast hidden"></div>
+
+      <section class="grid two">
+        <article class="card">
+          <h2>✅ タスク管理</h2>
+          <div class="inlineForm">
+            <select id="taskPriority"><option>S</option><option selected>A</option><option>B</option></select>
+            <input id="taskTitle" placeholder="例: デロイトWebテスト" />
+            <button id="addTask">＋ 追加</button>
+          </div>
+          <div id="tasks"></div>
+        </article>
+
+        <article class="card">
+          <h2>📅 Googleカレンダー</h2>
+          <p class="muted">Google Calendar APIで既存予定を取得し、手動でDailyPilot予定へ取り込めます。予定ブロックからGoogle側への追加も可能です。</p>
+          <div class="actions">
+            <button id="connectGoogle">Google連携</button>
+            <button id="fetchGoogle">予定を取得</button>
+          </div>
+          <div id="googleEvents" class="googleEvents"></div>
+        </article>
+      </section>
+
+      <section class="grid two">
+        <article class="card scheduleCard">
+          <h2>🗓️ 1日のスケジュール</h2>
+          <div class="inlineForm scheduleForm">
+            <input id="scheduleStart" type="time" value="09:00" />
+            <input id="scheduleEnd" type="time" value="10:00" />
+            <input id="scheduleTitle" placeholder="例: 長期インターン①" />
+            <button id="addSchedule">＋ 追加</button>
+          </div>
+          <p id="overlapWarning" class="warning hidden">時間が重複している予定があります。</p>
+          <div id="timeline" class="timeline"></div>
+        </article>
+
+        <article class="card">
+          <h2>▶️ 実績タイマー</h2>
+          <div class="inlineForm">
+            <input id="timerTitle" placeholder="いま行うこと" />
+            <button id="startTimer">開始</button>
+          </div>
+          <div id="logs" class="logs"></div>
+
+          <div class="reflection">
+            <h2>振り返り</h2>
+            <label>タスク達成率<input id="achievementRate" type="number" min="0" max="100" /></label>
+            <label>理由<textarea id="reason" placeholder="予定通りできた/できなかった理由"></textarea></label>
+            <label>改善点<textarea id="improvement" placeholder="明日変える行動"></textarea></label>
+            <label>良かった点<textarea id="goodPoints"></textarea></label>
+            <label>明日へのメモ<textarea id="tomorrowNotes"></textarea></label>
+            <button id="saveReflection">振り返りを保存</button>
+          </div>
+        </article>
+      </section>
+
+      <section class="card exportCard">
+        <h2>📋 テキスト出力</h2>
+        <textarea id="exportText" readonly></textarea>
+        <button id="copyText">クリップボードにコピー</button>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

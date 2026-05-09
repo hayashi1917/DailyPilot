@@ -1,0 +1,12 @@
+name = "daily-pilot"
+compatibility_date = "2026-05-09"
+pages_build_output_dir = "public"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "daily-pilot"
+database_id = "replace-with-your-d1-database-id"
+
+[vars]
+GOOGLE_REDIRECT_URI = "http://localhost:8788/api/google/callback"
+APP_BASE_URL = "http://localhost:8788"
