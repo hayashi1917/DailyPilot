@@ -1,13 +1,23 @@
 {
   "name": "daily-pilot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler pages dev public --d1 DB=daily-pilot",
-    "deploy": "wrangler pages deploy public --project-name daily-pilot",
-    "check": "node --check public/app.js && node --check functions/api/[[path]].js",
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "deploy": "wrangler pages deploy dist --project-name daily-pilot",
+    "check": "node --check functions/api/[[path]].js && node --check functions/db/schema.js",
     "db:migrate:local": "wrangler d1 migrations apply daily-pilot --local",
     "db:migrate:prod": "wrangler d1 migrations apply daily-pilot --remote"
+  },
+  "dependencies": {
+    "drizzle-orm": "latest",
+    "vite": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "wrangler": "latest"
   }
 }
