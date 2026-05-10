@@ -333,11 +333,14 @@ function SchedulePanel({ date, schedule, overlaps, onMutate }) {
             <strong>{block.title}</strong>
             <em>{block.source === "google_calendar" ? "Google" : "Manual"}</em>
             <div>
-              <button onClick={() => onMutate(api("/google/events", {
-                method: "POST",
-                body: JSON.stringify({ date, title: block.title, startTime: block.startTime, endTime: block.endTime }),
-              }), "Googleカレンダーへ追加しました")}>
-                Googleへ追加
+              <button
+                disabled={Boolean(block.externalEventId)}
+                onClick={() => onMutate(api("/google/events", {
+                  method: "POST",
+                  body: JSON.stringify({ scheduleBlockId: block.id, date, title: block.title, startTime: block.startTime, endTime: block.endTime }),
+                }), "Googleカレンダーへ追加しました")}
+              >
+                {block.externalEventId ? "Google連携済み" : "Googleへ追加"}
               </button>
               <button className="ghost" onClick={() => onMutate(api(`/schedule/${block.id}`, { method: "DELETE" }))}>削除</button>
             </div>
