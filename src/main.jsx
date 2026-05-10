@@ -42,39 +42,75 @@ function hasScheduleOverlap(schedule) {
   );
 }
 
-function buildExportText(summary) {
-  const lines = [`【${japaneseDate(summary.day.date)}タスクマネジメント】`];
+function formatLogTime(value) {
+  return new Date(value).toLocaleTimeString("ja-JP", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "Asia/Tokyo",
+  });
+}
 
-  PRIORITIES.forEach((priority) => {
-    const tasks = summary.tasks.filter((task) => task.priority === priority);
-    if (tasks.length === 0) return;
+function buildTaskLines(tasks) {
+  return PRIORITIES.flatMap((priority) => {
+    const priorityTasks = tasks.filter((task) => task.priority === priority);
+    if (priorityTasks.length === 0) return [];
 
     const separator = priority === "A" ? "." : ",";
-    const taskText = tasks
+    const taskText = priorityTasks
       .map((task) => `${task.title}${STATUS_MARKS[task.status]}`)
       .join(separator);
-    lines.push(`${priority}：${taskText}`);
+    return [`${priority}：${taskText}`];
   });
+}
 
-  lines.push("");
-  summary.schedule.forEach((block) => {
-    lines.push(`${block.startTime} - ${block.endTime} ${block.title}`);
+function buildIdealScheduleLines(schedule) {
+  if (schedule.length === 0) return ["予定なし"];
+  return schedule.map((block) => `${block.startTime} - ${block.endTime} ${block.title}`);
+}
+
+function buildActualScheduleLines(actualLogs) {
+  if (actualLogs.length === 0) return ["実績ログなし"];
+
+  return actualLogs.map((log) => {
+    const start = formatLogTime(log.startedAt);
+    const end = log.endedAt ? formatLogTime(log.endedAt) : "実行中";
+    const duration = log.durationMinutes ? `（${log.durationMinutes}分）` : "";
+    return `${start} - ${end} ${log.title}${duration}`;
   });
+}
 
-  lines.push(
-    "",
+function buildExportText(summary) {
+  const taskLines = buildTaskLines(summary.tasks);
+  const idealScheduleLines = buildIdealScheduleLines(summary.schedule);
+  const actualScheduleLines = buildActualScheduleLines(summary.actualLogs);
+  const completionLines = taskLines.length ? taskLines : ["タスクなし"];
+  const reflectionLines = [
     "振り返り",
     `・タスク達成率 ${summary.reflection.achievementRate}%`,
     "・理由",
     summary.reflection.reason || "未入力",
     "・改善点",
     summary.reflection.improvement || "未入力",
-  );
+  ];
 
-  if (summary.reflection.goodPoints) lines.push("・良かった点", summary.reflection.goodPoints);
-  if (summary.reflection.tomorrowNotes) lines.push("・明日へのメモ", summary.reflection.tomorrowNotes);
+  if (summary.reflection.goodPoints) reflectionLines.push("・良かった点", summary.reflection.goodPoints);
+  if (summary.reflection.tomorrowNotes) reflectionLines.push("・明日へのメモ", summary.reflection.tomorrowNotes);
 
-  return lines.join("\n");
+  return [
+    `【${japaneseDate(summary.day.date)}タスクマネジメント】`,
+    ...taskLines,
+    "",
+    "理想の1日のスケジュール",
+    ...idealScheduleLines,
+    "",
+    "実際に過ごした1日のスケジュール",
+    ...actualScheduleLines,
+    "",
+    "タスク完了状況",
+    ...completionLines,
+    "",
+    ...reflectionLines,
+  ].join("\n");
 }
 
 function AuthScreen({ onAuthenticated }) {
@@ -201,6 +237,14 @@ function TaskPanel({ date, tasks, onMutate }) {
 }
 
 function GoogleCalendarPanel({ date, googleSync, setMessage, onMutate }) {
+  const [googleConfig, setGoogleConfig] = useState(null);
+
+  useEffect(() => {
+    api("/google/config")
+      .then(setGoogleConfig)
+      .catch((error) => setMessage(error.message));
+  }, [setMessage]);
+
   async function connectGoogle() {
     try {
       const data = await api("/google/auth-url");
@@ -214,10 +258,27 @@ function GoogleCalendarPanel({ date, googleSync, setMessage, onMutate }) {
     }
   }
 
+  async function copyRedirectUri() {
+    if (!googleConfig?.redirectUri) return;
+    await navigator.clipboard.writeText(googleConfig.redirectUri);
+    setMessage("Google OAuth のリダイレクトURIをコピーしました");
+  }
+
   return (
     <article className="card">
       <h2>📅 Googleカレンダー</h2>
       <p className="muted">Google連携後は、対象日を開くたびに一定間隔で自動同期します。今すぐ反映したい場合は「今すぐ同期」を押してください。</p>
+      {googleConfig?.redirectUri && (
+        <div className="oauthHint">
+          <strong>redirect_uri_mismatch が出る場合</strong>
+          <p>Google Cloud Console の「承認済みのリダイレクト URI」に、以下を完全一致で登録してください。</p>
+          <code>{googleConfig.redirectUri}</code>
+          {googleConfig.ignoredConfiguredRedirectUri && (
+            <p className="warning compact">古い GOOGLE_REDIRECT_URI（{googleConfig.ignoredConfiguredRedirectUri}）は現在のアクセス元と違うため無視しています。</p>
+          )}
+          <button className="ghost" onClick={copyRedirectUri}>URIをコピー</button>
+        </div>
+      )}
       <div className="actions">
         <button onClick={connectGoogle}>Google連携</button>
         <button onClick={() => onMutate(

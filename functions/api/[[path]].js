@@ -80,24 +80,24 @@ async function verifyPassword(password, stored) {
   return hash === hashValue;
 }
 
-// Google OAuthトークンはD1保存前にAES-GCMで暗号化します。
-async function encryptionKey(env) {
-  if (!env.TOKEN_ENCRYPTION_KEY) throw new Error("TOKEN_ENCRYPTION_KEY is required for Google token encryption");
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(env.TOKEN_ENCRYPTION_KEY));
+// Google OAuthトークンはD1保存前にAES-GCMで暗号化します。TOKEN_ENCRYPTION_KEY 未設定時はアクセス元オリジンから鍵を導出します。
+async function encryptionKey(env, request) {
+  const secret = env.TOKEN_ENCRYPTION_KEY || `daily-pilot:${new URL(request.url).origin}`;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
   return crypto.subtle.importKey("raw", digest, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
 }
 
-async function encryptToken(env, token) {
+async function encryptToken(env, request, token) {
   if (!token) return null;
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await encryptionKey(env), new TextEncoder().encode(token));
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await encryptionKey(env, request), new TextEncoder().encode(token));
   return `${bytesToBase64(iv)}:${bytesToBase64(encrypted)}`;
 }
 
-async function decryptToken(env, encryptedToken) {
+async function decryptToken(env, request, encryptedToken) {
   if (!encryptedToken) return null;
   const [ivValue, tokenValue] = encryptedToken.split(":");
-  const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(ivValue) }, await encryptionKey(env), base64ToBytes(tokenValue));
+  const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(ivValue) }, await encryptionKey(env, request), base64ToBytes(tokenValue));
   return new TextDecoder().decode(decrypted);
 }
 
@@ -154,25 +154,93 @@ function timeFromGoogle(value, fallback) {
   return (value || fallback).slice(11, 16);
 }
 
+function requestOrigin(request) {
+  return new URL(request.url).origin;
+}
+
+function googleRedirectConfig(env, request) {
+  const origin = requestOrigin(request);
+  const autoRedirectUri = `${origin}/api/google/callback`;
+  const configuredRedirectUri = env.GOOGLE_REDIRECT_URI?.trim();
+
+  if (!configuredRedirectUri) {
+    return { redirectUri: autoRedirectUri, autoRedirectUri, configuredRedirectUri: null, ignoredConfiguredRedirectUri: null };
+  }
+
+  try {
+    const configuredOrigin = new URL(configuredRedirectUri).origin;
+    if (configuredOrigin !== origin) {
+      return { redirectUri: autoRedirectUri, autoRedirectUri, configuredRedirectUri, ignoredConfiguredRedirectUri: configuredRedirectUri };
+    }
+
+    return { redirectUri: configuredRedirectUri, autoRedirectUri, configuredRedirectUri, ignoredConfiguredRedirectUri: null };
+  } catch {
+    return { redirectUri: autoRedirectUri, autoRedirectUri, configuredRedirectUri, ignoredConfiguredRedirectUri: configuredRedirectUri };
+  }
+}
+
+function googleRedirectUri(env, request) {
+  return googleRedirectConfig(env, request).redirectUri;
+}
+
+function appBaseUrl(env, request) {
+  const origin = requestOrigin(request);
+  const configuredBaseUrl = env.APP_BASE_URL?.trim();
+  if (!configuredBaseUrl) return origin;
+  try {
+    return new URL(configuredBaseUrl).origin === origin ? configuredBaseUrl : origin;
+  } catch {
+    return origin;
+  }
+}
+
+function googleConfig(env, request) {
+  return {
+    clientId: env.GOOGLE_CLIENT_ID,
+    clientSecret: env.GOOGLE_CLIENT_SECRET,
+    redirectUri: googleRedirectUri(env, request),
+  };
+}
+
+function missingGoogleConfig(env) {
+  const missing = [];
+  if (!env.GOOGLE_CLIENT_ID) missing.push("GOOGLE_CLIENT_ID");
+  if (!env.GOOGLE_CLIENT_SECRET) missing.push("GOOGLE_CLIENT_SECRET");
+  return missing;
+}
+
+function googleConfigStatus(env, request) {
+  const missing = missingGoogleConfig(env);
+  const redirect = googleRedirectConfig(env, request);
+  return {
+    configured: missing.length === 0,
+    missing,
+    redirectUri: redirect.redirectUri,
+    autoRedirectUri: redirect.autoRedirectUri,
+    ignoredConfiguredRedirectUri: redirect.ignoredConfiguredRedirectUri,
+  };
+}
+
 // 暗号化済みトークンを復号し、期限切れの場合はrefresh tokenで更新します。
-async function getGoogleAccessToken(env, userId) {
+async function getGoogleAccessToken(env, request, userId) {
   const appDb = db(env);
   const account = await appDb.select().from(calendarAccounts).where(and(eq(calendarAccounts.userId, userId), eq(calendarAccounts.provider, GOOGLE_PROVIDER))).get();
   if (!account) return null;
-  const currentAccessToken = await decryptToken(env, account.encryptedAccessToken);
+  const currentAccessToken = await decryptToken(env, request, account.encryptedAccessToken);
   if (account.expiresAt > Math.floor(Date.now() / 1000) + 60) return currentAccessToken;
-  const refreshToken = await decryptToken(env, account.encryptedRefreshToken);
-  if (!refreshToken || !env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) return currentAccessToken;
+  const refreshToken = await decryptToken(env, request, account.encryptedRefreshToken);
+  const config = googleConfig(env, request);
+  if (!refreshToken || !config.clientId || !config.clientSecret) return currentAccessToken;
 
   const response = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, refresh_token: refreshToken, grant_type: "refresh_token" }),
+    body: new URLSearchParams({ client_id: config.clientId, client_secret: config.clientSecret, refresh_token: refreshToken, grant_type: "refresh_token" }),
   });
   if (!response.ok) return currentAccessToken;
   const refreshed = await response.json();
   const expiresAt = Math.floor(Date.now() / 1000) + refreshed.expires_in;
-  await appDb.update(calendarAccounts).set({ encryptedAccessToken: await encryptToken(env, refreshed.access_token), expiresAt, updatedAt: sql`CURRENT_TIMESTAMP` }).where(and(eq(calendarAccounts.userId, userId), eq(calendarAccounts.provider, GOOGLE_PROVIDER))).run();
+  await appDb.update(calendarAccounts).set({ encryptedAccessToken: await encryptToken(env, request, refreshed.access_token), expiresAt, updatedAt: sql`CURRENT_TIMESTAMP` }).where(and(eq(calendarAccounts.userId, userId), eq(calendarAccounts.provider, GOOGLE_PROVIDER))).run();
   return refreshed.access_token;
 }
 
@@ -188,8 +256,8 @@ async function fetchGoogleEvents(accessToken, date) {
 
 // 日次画面を開いたときにGoogleカレンダーを自動同期します。
 // force=true の場合は最短同期間隔を無視して即時同期します。
-async function autoSyncGoogle(env, userId, date, dayId, force = false) {
-  const accessToken = await getGoogleAccessToken(env, userId);
+async function autoSyncGoogle(env, request, userId, date, dayId, force = false) {
+  const accessToken = await getGoogleAccessToken(env, request, userId);
   if (!accessToken) return { connected: false, synced: false };
   const appDb = db(env);
   const minutes = Number(env.CALENDAR_AUTO_SYNC_MINUTES || 15);
@@ -216,10 +284,10 @@ async function autoSyncGoogle(env, userId, date, dayId, force = false) {
 }
 
 // フロントエンドが1回のAPI呼び出しで描画できるよう、日次画面に必要な情報をまとめて返します。
-async function getDaySummary(env, userId, date) {
+async function getDaySummary(env, request, userId, date) {
   const appDb = db(env);
   const day = await ensureDay(appDb, userId, date);
-  const sync = await autoSyncGoogle(env, userId, date, day.id).catch((error) => ({ connected: true, synced: false, error: error.message }));
+  const sync = await autoSyncGoogle(env, request, userId, date, day.id).catch((error) => ({ connected: true, synced: false, error: error.message }));
   const taskRows = await appDb.select().from(tasks).where(and(eq(tasks.userId, userId), eq(tasks.dayId, day.id))).orderBy(tasks.priority, tasks.sortOrder, tasks.id).all();
   const scheduleRows = await appDb.select().from(scheduleBlocks).where(and(eq(scheduleBlocks.userId, userId), eq(scheduleBlocks.dayId, day.id))).orderBy(scheduleBlocks.startTime, scheduleBlocks.id).all();
   const logRows = await appDb.select().from(actualLogs).where(and(eq(actualLogs.userId, userId), eq(actualLogs.dayId, day.id))).orderBy(actualLogs.startedAt, actualLogs.id).all();
@@ -228,12 +296,13 @@ async function getDaySummary(env, userId, date) {
   return { day, tasks: taskRows, schedule: scheduleRows, actualLogs: logRows, reflection: reflection || { achievementRate, reason: "", improvement: "", goodPoints: "", tomorrowNotes: "" }, googleSync: sync };
 }
 
-async function exchangeGoogleCode(env, code) {
-  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.GOOGLE_REDIRECT_URI) throw new Error("Google OAuth environment variables are not configured");
+async function exchangeGoogleCode(env, request, code) {
+  const config = googleConfig(env, request);
+  if (!config.clientId || !config.clientSecret) throw new Error("Google OAuth client id/secret are not configured");
   const response = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ code, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, redirect_uri: env.GOOGLE_REDIRECT_URI, grant_type: "authorization_code" }),
+    body: new URLSearchParams({ code, client_id: config.clientId, client_secret: config.clientSecret, redirect_uri: config.redirectUri, grant_type: "authorization_code" }),
   });
   if (!response.ok) throw new Error(`Google token exchange failed: ${await response.text()}`);
   return response.json();
@@ -292,7 +361,7 @@ async function handleApi({ request, env }) {
     if (request.method === "GET" && path.startsWith("/days/")) {
       const date = decodeURIComponent(path.split("/")[2] || "");
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return badRequest("Invalid date");
-      return json(await getDaySummary(env, user.id, date));
+      return json(await getDaySummary(env, request, user.id, date));
     }
 
     // タスク作成
@@ -302,7 +371,7 @@ async function handleApi({ request, env }) {
       const day = await ensureDay(appDb, user.id, body.date);
       const [max] = await appDb.select({ next: sql`COALESCE(MAX(${tasks.sortOrder}), 0) + 1` }).from(tasks).where(and(eq(tasks.userId, user.id), eq(tasks.dayId, day.id), eq(tasks.priority, body.priority))).all();
       await appDb.insert(tasks).values({ dayId: day.id, userId: user.id, title: body.title.trim(), priority: body.priority, status: "planned", sortOrder: Number(max?.next || 1) }).run();
-      return json(await getDaySummary(env, user.id, body.date));
+      return json(await getDaySummary(env, request, user.id, body.date));
     }
 
     if (request.method === "PATCH" && path.startsWith("/tasks/")) {
@@ -323,7 +392,7 @@ async function handleApi({ request, env }) {
       if (!body.title?.trim()) return badRequest("Schedule title is required");
       const day = await ensureDay(appDb, user.id, body.date);
       await appDb.insert(scheduleBlocks).values({ dayId: day.id, userId: user.id, title: body.title.trim(), startTime: body.startTime, endTime: body.endTime, source: body.source || "manual", externalEventId: body.externalEventId || null, sortOrder: 0 }).run();
-      return json(await getDaySummary(env, user.id, body.date));
+      return json(await getDaySummary(env, request, user.id, body.date));
     }
 
     if (request.method === "PATCH" && path.startsWith("/schedule/")) {
@@ -343,7 +412,7 @@ async function handleApi({ request, env }) {
       const body = await request.json();
       const day = await ensureDay(appDb, user.id, body.date);
       await appDb.insert(actualLogs).values({ dayId: day.id, userId: user.id, scheduleBlockId: body.scheduleBlockId || null, title: body.title, startedAt: new Date().toISOString() }).run();
-      return json(await getDaySummary(env, user.id, body.date));
+      return json(await getDaySummary(env, request, user.id, body.date));
     }
 
     if (request.method === "POST" && path === "/timer/stop") {
@@ -361,17 +430,28 @@ async function handleApi({ request, env }) {
       const body = await request.json();
       const day = await ensureDay(appDb, user.id, date);
       await appDb.insert(reflections).values({ dayId: day.id, userId: user.id, achievementRate: body.achievementRate, reason: body.reason, improvement: body.improvement, goodPoints: body.goodPoints, tomorrowNotes: body.tomorrowNotes }).onConflictDoUpdate({ target: [reflections.userId, reflections.dayId], set: { achievementRate: body.achievementRate, reason: body.reason, improvement: body.improvement, goodPoints: body.goodPoints, tomorrowNotes: body.tomorrowNotes, updatedAt: sql`CURRENT_TIMESTAMP` } }).run();
-      return json(await getDaySummary(env, user.id, date));
+      return json(await getDaySummary(env, request, user.id, date));
+    }
+
+    if (request.method === "GET" && path === "/google/config") {
+      return json(googleConfigStatus(env, request));
     }
 
     // Google OAuth開始URLを生成します。CSRF対策としてstateをD1に保存します。
     if (request.method === "GET" && path === "/google/auth-url") {
-      if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_REDIRECT_URI) return json({ configured: false, error: "Google OAuth is not configured" }, { status: 503 });
+      const status = googleConfigStatus(env, request);
+      if (!status.configured) {
+        return json({
+          ...status,
+          error: `Google OAuth の ${status.missing.join(", ")} が未設定です。リダイレクトURIは ${status.redirectUri} を Google Cloud Console に登録してください。`,
+        }, { status: 503 });
+      }
+      const config = googleConfig(env, request);
       const state = randomId(24);
       await appDb.insert(oauthStates).values({ state, userId: user.id, expiresAt: Math.floor(Date.now() / 1000) + 600 }).run();
       const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
-      authUrl.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: env.GOOGLE_REDIRECT_URI, response_type: "code", access_type: "offline", prompt: "consent", scope: "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.readonly", state }).toString();
-      return json({ configured: true, authUrl: authUrl.toString() });
+      authUrl.search = new URLSearchParams({ client_id: config.clientId, redirect_uri: config.redirectUri, response_type: "code", access_type: "offline", prompt: "consent", scope: "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.readonly", state }).toString();
+      return json({ ...status, authUrl: authUrl.toString(), redirectUri: config.redirectUri });
     }
 
     // Google OAuth callback。state検証後にトークンを暗号化保存します。
@@ -381,23 +461,23 @@ async function handleApi({ request, env }) {
       if (!code || !state) return badRequest("Missing Google authorization code or state");
       const oauthState = await appDb.select().from(oauthStates).where(and(eq(oauthStates.state, state), sql`${oauthStates.expiresAt} > ${Math.floor(Date.now() / 1000)}`)).get();
       if (!oauthState) return badRequest("Invalid or expired OAuth state");
-      const token = await exchangeGoogleCode(env, code);
+      const token = await exchangeGoogleCode(env, request, code);
       const expiresAt = Math.floor(Date.now() / 1000) + token.expires_in;
-      await appDb.insert(calendarAccounts).values({ userId: oauthState.userId, provider: GOOGLE_PROVIDER, encryptedAccessToken: await encryptToken(env, token.access_token), encryptedRefreshToken: await encryptToken(env, token.refresh_token), expiresAt }).onConflictDoUpdate({ target: [calendarAccounts.userId, calendarAccounts.provider], set: { encryptedAccessToken: await encryptToken(env, token.access_token), encryptedRefreshToken: token.refresh_token ? await encryptToken(env, token.refresh_token) : sql`${calendarAccounts.encryptedRefreshToken}`, expiresAt, updatedAt: sql`CURRENT_TIMESTAMP` } }).run();
+      await appDb.insert(calendarAccounts).values({ userId: oauthState.userId, provider: GOOGLE_PROVIDER, encryptedAccessToken: await encryptToken(env, request, token.access_token), encryptedRefreshToken: await encryptToken(env, request, token.refresh_token), expiresAt }).onConflictDoUpdate({ target: [calendarAccounts.userId, calendarAccounts.provider], set: { encryptedAccessToken: await encryptToken(env, request, token.access_token), encryptedRefreshToken: token.refresh_token ? await encryptToken(env, request, token.refresh_token) : sql`${calendarAccounts.encryptedRefreshToken}`, expiresAt, updatedAt: sql`CURRENT_TIMESTAMP` } }).run();
       await appDb.delete(oauthStates).where(eq(oauthStates.state, state)).run();
-      return Response.redirect(`${env.APP_BASE_URL || url.origin}/?google=connected`, 302);
+      return Response.redirect(`${appBaseUrl(env, request)}/?google=connected`, 302);
     }
 
     if (request.method === "POST" && path === "/google/sync") {
       const body = await request.json();
       const day = await ensureDay(appDb, user.id, body.date);
-      return json(await autoSyncGoogle(env, user.id, body.date, day.id, Boolean(body.force)));
+      return json(await autoSyncGoogle(env, request, user.id, body.date, day.id, Boolean(body.force)));
     }
 
     // DailyPilotの予定をGoogleカレンダーへ追加します。
     if (request.method === "POST" && path === "/google/events") {
       const body = await request.json();
-      const accessToken = await getGoogleAccessToken(env, user.id);
+      const accessToken = await getGoogleAccessToken(env, request, user.id);
       if (!accessToken) return json({ error: "Google Calendar is not connected" }, { status: 401 });
       const response = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
         method: "POST",
