@@ -42,26 +42,59 @@ function hasScheduleOverlap(schedule) {
   );
 }
 
-function buildExportText(summary) {
-  const lines = [`【${japaneseDate(summary.day.date)}タスクマネジメント】`];
+function formatLogTime(value) {
+  return new Date(value).toLocaleTimeString("ja-JP", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "Asia/Tokyo",
+  });
+}
 
-  PRIORITIES.forEach((priority) => {
-    const tasks = summary.tasks.filter((task) => task.priority === priority);
-    if (tasks.length === 0) return;
+function buildTaskLines(tasks) {
+  return PRIORITIES.flatMap((priority) => {
+    const priorityTasks = tasks.filter((task) => task.priority === priority);
+    if (priorityTasks.length === 0) return [];
 
     const separator = priority === "A" ? "." : ",";
-    const taskText = tasks
+    const taskText = priorityTasks
       .map((task) => `${task.title}${STATUS_MARKS[task.status]}`)
       .join(separator);
-    lines.push(`${priority}：${taskText}`);
+    return [`${priority}：${taskText}`];
   });
+}
 
-  lines.push("");
-  summary.schedule.forEach((block) => {
-    lines.push(`${block.startTime} - ${block.endTime} ${block.title}`);
+function buildIdealScheduleLines(schedule) {
+  if (schedule.length === 0) return ["予定なし"];
+  return schedule.map((block) => `${block.startTime} - ${block.endTime} ${block.title}`);
+}
+
+function buildActualScheduleLines(actualLogs) {
+  if (actualLogs.length === 0) return ["実績ログなし"];
+
+  return actualLogs.map((log) => {
+    const start = formatLogTime(log.startedAt);
+    const end = log.endedAt ? formatLogTime(log.endedAt) : "実行中";
+    const duration = log.durationMinutes ? `（${log.durationMinutes}分）` : "";
+    return `${start} - ${end} ${log.title}${duration}`;
   });
+}
+
+function buildExportText(summary) {
+  const lines = [`【${japaneseDate(summary.day.date)}タスクマネジメント】`];
+  const taskLines = buildTaskLines(summary.tasks);
+
+  if (taskLines.length) lines.push(...taskLines);
 
   lines.push(
+    "",
+    "理想の1日のスケジュール",
+    ...buildIdealScheduleLines(summary.schedule),
+    "",
+    "実際に過ごした1日のスケジュール",
+    ...buildActualScheduleLines(summary.actualLogs),
+    "",
+    "タスク完了状況",
+    ...(taskLines.length ? taskLines : ["タスクなし"]),
     "",
     "振り返り",
     `・タスク達成率 ${summary.reflection.achievementRate}%`,
