@@ -34,11 +34,11 @@ function field(value, camelName, snakeName) {
   return value?.[camelName] ?? value?.[snakeName];
 }
 
-function buildTaskLines(tasks) {
+function buildTaskLines(tasks, { includeStatusMarks = true } = {}) {
   return priorities.flatMap((priority) => {
     const priorityTasks = tasks.filter((task) => task.priority === priority);
     if (priorityTasks.length === 0) return [];
-    return [`${priority}：${priorityTasks.map((task) => `${task.title}${statusMarks[task.status]}`).join(priority === "A" ? "." : ",")}`];
+    return [`${priority}：${priorityTasks.map((task) => `${task.title}${includeStatusMarks ? statusMarks[task.status] : ""}`).join(priority === "A" ? "." : ",")}`];
   });
 }
 
@@ -51,33 +51,44 @@ function formatLogTime(value) {
   return new Date(value).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Tokyo" });
 }
 
-function buildActualScheduleLines(actualLogs) {
+function buildActualScheduleLines(actualLogs, now = new Date()) {
   if (actualLogs.length === 0) return ["（実際のスケジュール未記録）"];
   return actualLogs.map((log) => {
-    const start = formatLogTime(field(log, "startedAt", "started_at"));
+    const startedAt = field(log, "startedAt", "started_at");
+    const start = formatLogTime(startedAt);
     const endedAt = field(log, "endedAt", "ended_at");
-    const end = endedAt ? formatLogTime(endedAt) : "実行中";
-    const durationMinutes = field(log, "durationMinutes", "duration_minutes");
-    const duration = durationMinutes ? `（${durationMinutes}分）` : "";
+    const isRunning = !endedAt;
+    const end = isRunning ? "実行中" : formatLogTime(endedAt);
+    const durationMinutes = isRunning
+      ? Math.max(1, Math.round((now.getTime() - new Date(startedAt).getTime()) / 60000))
+      : field(log, "durationMinutes", "duration_minutes");
+    const duration = durationMinutes ? `（${isRunning ? "経過" : ""}${durationMinutes}分）` : "";
     return `${start} - ${end} ${log.title}${duration}`;
   });
 }
 
-function buildExportText(data) {
-  const lines = [`【${formatJapaneseDate(data.day.date)}タスクマネジメント】`];
-  const taskLines = buildTaskLines(data.tasks);
-  if (taskLines.length) lines.push(...taskLines);
-
-  lines.push(
+function buildTargetExportText(data) {
+  const targetTaskLines = buildTaskLines(data.tasks, { includeStatusMarks: false });
+  const lines = [
+    `【${formatJapaneseDate(data.day.date)} 目標】`,
+    "目標タスク",
+    ...(targetTaskLines.length ? targetTaskLines : ["タスクなし"]),
     "",
-    "【目標スケジュール】",
+    "目標スケジュール",
     ...buildTargetScheduleLines(data.schedule),
-    "",
-    "【実際のスケジュール】",
-    ...buildActualScheduleLines(data.actualLogs),
-    "",
+  ];
+  return lines.join("\n");
+}
+
+function buildActualExportText(data, now = new Date()) {
+  const actualTaskLines = buildTaskLines(data.tasks);
+  const lines = [
+    `【${formatJapaneseDate(data.day.date)} 実際】`,
     "タスク完了状況",
-    ...(taskLines.length ? taskLines : ["タスクなし"]),
+    ...(actualTaskLines.length ? actualTaskLines : ["タスクなし"]),
+    "",
+    "実際のスケジュール（リアルタイム計測）",
+    ...buildActualScheduleLines(data.actualLogs, now),
     "",
     "振り返り",
     `・タスク達成率 ${field(data.reflection, "achievementRate", "achievement_rate")}%`,
@@ -85,7 +96,7 @@ function buildExportText(data) {
     data.reflection.reason || "未入力",
     "・改善点",
     data.reflection.improvement || "未入力",
-  );
+  ];
   const goodPoints = field(data.reflection, "goodPoints", "good_points");
   const tomorrowNotes = field(data.reflection, "tomorrowNotes", "tomorrow_notes");
   if (goodPoints) lines.push("・良かった点", goodPoints);
@@ -103,7 +114,8 @@ function render() {
   renderSchedule();
   renderLogs();
   renderReflection();
-  $("exportText").value = buildExportText(summary);
+  $("targetExportText").value = buildTargetExportText(summary);
+  $("actualExportText").value = buildActualExportText(summary);
 }
 
 function renderTasks() {
@@ -258,6 +270,11 @@ $("startTimer").addEventListener("click", () => startTimer().catch((error) => to
 $("saveReflection").addEventListener("click", () => saveReflection().catch((error) => toast(error.message)));
 $("connectGoogle").addEventListener("click", () => connectGoogle().catch((error) => toast(error.message)));
 $("fetchGoogle").addEventListener("click", () => fetchGoogleEvents().catch((error) => toast(error.message)));
-$("copyText").addEventListener("click", async () => { await navigator.clipboard.writeText($("exportText").value); toast("コピーしました"); });
+$("copyTargetText").addEventListener("click", async () => { await navigator.clipboard.writeText($("targetExportText").value); toast("目標をコピーしました"); });
+$("copyActualText").addEventListener("click", async () => { await navigator.clipboard.writeText($("actualExportText").value); toast("実際をコピーしました"); });
+
+window.setInterval(() => {
+  if (summary) $("actualExportText").value = buildActualExportText(summary);
+}, 30000);
 
 load().catch((error) => toast(error.message));
