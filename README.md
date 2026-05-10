@@ -140,7 +140,7 @@ wrangler pages secret put GOOGLE_CLIENT_SECRET
 | `APP_BASE_URL` | 任意 | DailyPilot アプリ本体のURL。未設定時はアクセス元オリジンを自動利用します | `https://daily-pilot.pages.dev` |
 | `CALENDAR_AUTO_SYNC_MINUTES` | 任意 | Googleカレンダー自動同期の最短間隔 | `15` |
 
-`TOKEN_ENCRYPTION_KEY` は未設定でも動作しますが、独自ドメイン変更後も既存トークンを復号し続けたい本番運用では、十分に長く推測されにくい値を設定して固定してください。
+`TOKEN_ENCRYPTION_KEY` は未設定でも動作しますが、独自ドメイン変更後も既存トークンを復号し続けたい本番運用では、十分に長く推測されにくい値を設定して固定してください。既存の `GOOGLE_REDIRECT_URI` / `APP_BASE_URL` が現在アクセスしているドメインと異なる場合は、`redirect_uri_mismatch` を避けるため現在のドメインから自動生成したURLを優先します。
 
 ローカル開発で同期間隔だけ変えたい場合は、`wrangler.toml` に次のように設定できます。
 
@@ -191,7 +191,7 @@ https://daily-pilot.pages.dev/api/google/callback
 http://localhost:8788/api/google/callback
 ```
 
-ここに登録する値は、DailyPilot が自動生成する `https://<your-domain>/api/google/callback` と完全に一致している必要があります。独自ドメインやローカルURLを使う場合は、それぞれのコールバックURLも Google Cloud Console に追加してください。
+ここに登録する値は、DailyPilot が自動生成する `https://<your-domain>/api/google/callback` と完全に一致している必要があります。アプリ画面の Googleカレンダーカードにも、現在アクセスしているドメインから生成した登録用 URI を表示しています。独自ドメイン、Cloudflare Pages のプレビューURL、ローカルURLなど複数のURLで使う場合は、それぞれのコールバックURLを Google Cloud Console に追加してください。
 
 ### 6. 必要なスコープ
 

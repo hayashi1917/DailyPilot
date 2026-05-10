@@ -154,12 +154,44 @@ function timeFromGoogle(value, fallback) {
   return (value || fallback).slice(11, 16);
 }
 
+function requestOrigin(request) {
+  return new URL(request.url).origin;
+}
+
+function googleRedirectConfig(env, request) {
+  const origin = requestOrigin(request);
+  const autoRedirectUri = `${origin}/api/google/callback`;
+  const configuredRedirectUri = env.GOOGLE_REDIRECT_URI?.trim();
+
+  if (!configuredRedirectUri) {
+    return { redirectUri: autoRedirectUri, autoRedirectUri, configuredRedirectUri: null, ignoredConfiguredRedirectUri: null };
+  }
+
+  try {
+    const configuredOrigin = new URL(configuredRedirectUri).origin;
+    if (configuredOrigin !== origin) {
+      return { redirectUri: autoRedirectUri, autoRedirectUri, configuredRedirectUri, ignoredConfiguredRedirectUri: configuredRedirectUri };
+    }
+
+    return { redirectUri: configuredRedirectUri, autoRedirectUri, configuredRedirectUri, ignoredConfiguredRedirectUri: null };
+  } catch {
+    return { redirectUri: autoRedirectUri, autoRedirectUri, configuredRedirectUri, ignoredConfiguredRedirectUri: configuredRedirectUri };
+  }
+}
+
 function googleRedirectUri(env, request) {
-  return env.GOOGLE_REDIRECT_URI || `${new URL(request.url).origin}/api/google/callback`;
+  return googleRedirectConfig(env, request).redirectUri;
 }
 
 function appBaseUrl(env, request) {
-  return env.APP_BASE_URL || new URL(request.url).origin;
+  const origin = requestOrigin(request);
+  const configuredBaseUrl = env.APP_BASE_URL?.trim();
+  if (!configuredBaseUrl) return origin;
+  try {
+    return new URL(configuredBaseUrl).origin === origin ? configuredBaseUrl : origin;
+  } catch {
+    return origin;
+  }
 }
 
 function googleConfig(env, request) {
@@ -175,6 +207,18 @@ function missingGoogleConfig(env) {
   if (!env.GOOGLE_CLIENT_ID) missing.push("GOOGLE_CLIENT_ID");
   if (!env.GOOGLE_CLIENT_SECRET) missing.push("GOOGLE_CLIENT_SECRET");
   return missing;
+}
+
+function googleConfigStatus(env, request) {
+  const missing = missingGoogleConfig(env);
+  const redirect = googleRedirectConfig(env, request);
+  return {
+    configured: missing.length === 0,
+    missing,
+    redirectUri: redirect.redirectUri,
+    autoRedirectUri: redirect.autoRedirectUri,
+    ignoredConfiguredRedirectUri: redirect.ignoredConfiguredRedirectUri,
+  };
 }
 
 // 暗号化済みトークンを復号し、期限切れの場合はrefresh tokenで更新します。
@@ -389,13 +433,17 @@ async function handleApi({ request, env }) {
       return json(await getDaySummary(env, request, user.id, date));
     }
 
+    if (request.method === "GET" && path === "/google/config") {
+      return json(googleConfigStatus(env, request));
+    }
+
     // Google OAuth開始URLを生成します。CSRF対策としてstateをD1に保存します。
     if (request.method === "GET" && path === "/google/auth-url") {
-      const missing = missingGoogleConfig(env);
-      if (missing.length) {
+      const status = googleConfigStatus(env, request);
+      if (!status.configured) {
         return json({
-          configured: false,
-          error: `Google OAuth の ${missing.join(", ")} が未設定です。リダイレクトURIとアプリURLは自動判定するため設定不要です。`,
+          ...status,
+          error: `Google OAuth の ${status.missing.join(", ")} が未設定です。リダイレクトURIは ${status.redirectUri} を Google Cloud Console に登録してください。`,
         }, { status: 503 });
       }
       const config = googleConfig(env, request);
@@ -403,7 +451,7 @@ async function handleApi({ request, env }) {
       await appDb.insert(oauthStates).values({ state, userId: user.id, expiresAt: Math.floor(Date.now() / 1000) + 600 }).run();
       const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       authUrl.search = new URLSearchParams({ client_id: config.clientId, redirect_uri: config.redirectUri, response_type: "code", access_type: "offline", prompt: "consent", scope: "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.readonly", state }).toString();
-      return json({ configured: true, authUrl: authUrl.toString(), redirectUri: config.redirectUri });
+      return json({ ...status, authUrl: authUrl.toString(), redirectUri: config.redirectUri });
     }
 
     // Google OAuth callback。state検証後にトークンを暗号化保存します。

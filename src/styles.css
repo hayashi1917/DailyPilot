@@ -34,6 +34,10 @@ h2 { display: flex; align-items: center; gap: 0.5rem; margin: 0 0 1rem; }
 .taskList { display: grid; gap: 10px; }
 .task { display: grid; grid-template-columns: 1fr 120px auto; gap: 8px; }
 .actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.oauthHint { display: grid; gap: 0.65rem; margin: 0 0 1rem; padding: 0.9rem; border: 1px solid #d9e0f2; border-radius: 16px; background: #f8faff; }
+.oauthHint p { margin: 0; color: #63708d; line-height: 1.6; }
+.oauthHint code { display: block; overflow-wrap: anywhere; padding: 0.75rem; border-radius: 12px; background: white; color: #172033; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.warning.compact { margin: 0; padding: 0.7rem; font-size: 0.9rem; }
 .timeline { padding: 12px; border-radius: 18px; background: linear-gradient(#f8faff 23px, transparent 24px) 0 0 / 100% 48px, #fff; border: 1px solid #e5ebfb; }
 .block { display: grid; grid-template-columns: 105px 1fr auto auto; gap: 10px; align-items: center; border-left: 6px solid #3158e7; background: #eef3ff; border-radius: 16px; padding: 12px; margin-bottom: 8px; }
 .block.google_calendar { border-left-color: #21a366; background: #edfff5; }

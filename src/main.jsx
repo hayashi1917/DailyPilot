@@ -50,38 +50,40 @@ function formatLogTime(value) {
   });
 }
 
-function buildTaskLines(tasks, { includeStatusMarks = true } = {}) {
+function buildTaskLines(tasks) {
   return PRIORITIES.flatMap((priority) => {
     const priorityTasks = tasks.filter((task) => task.priority === priority);
     if (priorityTasks.length === 0) return [];
 
     const separator = priority === "A" ? "." : ",";
     const taskText = priorityTasks
-      .map((task) => `${task.title}${includeStatusMarks ? STATUS_MARKS[task.status] : ""}`)
+      .map((task) => `${task.title}${STATUS_MARKS[task.status]}`)
       .join(separator);
     return [`${priority}：${taskText}`];
   });
 }
 
-function buildTargetScheduleLines(schedule) {
-  if (schedule.length === 0) return ["（目標スケジュール未登録）"];
+function buildIdealScheduleLines(schedule) {
+  if (schedule.length === 0) return ["予定なし"];
   return schedule.map((block) => `${block.startTime} - ${block.endTime} ${block.title}`);
 }
 
-function buildActualScheduleLines(actualLogs, now = new Date()) {
-  if (actualLogs.length === 0) return ["（実際のスケジュール未記録）"];
+function buildActualScheduleLines(actualLogs) {
+  if (actualLogs.length === 0) return ["実績ログなし"];
 
   return actualLogs.map((log) => {
     const start = formatLogTime(log.startedAt);
-    const isRunning = !log.endedAt;
-    const end = isRunning ? "実行中" : formatLogTime(log.endedAt);
-    const elapsedMinutes = isRunning
-      ? Math.max(1, Math.round((now.getTime() - new Date(log.startedAt).getTime()) / 60000))
-      : log.durationMinutes;
-    const duration = elapsedMinutes ? `（${isRunning ? "経過" : ""}${elapsedMinutes}分）` : "";
+    const end = log.endedAt ? formatLogTime(log.endedAt) : "実行中";
+    const duration = log.durationMinutes ? `（${log.durationMinutes}分）` : "";
     return `${start} - ${end} ${log.title}${duration}`;
   });
 }
+
+function buildExportText(summary) {
+  const lines = [`【${japaneseDate(summary.day.date)}タスクマネジメント】`];
+  const taskLines = buildTaskLines(summary.tasks);
+
+  if (taskLines.length) lines.push(...taskLines);
 
 function buildTargetExportText(summary) {
   const targetTaskLines = buildTaskLines(summary.tasks, { includeStatusMarks: false });
@@ -106,6 +108,15 @@ function buildActualExportText(summary, now = new Date()) {
     "",
     "実際のスケジュール（リアルタイム計測）",
     ...buildActualScheduleLines(summary.actualLogs, now),
+    "",
+    "理想の1日のスケジュール",
+    ...buildIdealScheduleLines(summary.schedule),
+    "",
+    "実際に過ごした1日のスケジュール",
+    ...buildActualScheduleLines(summary.actualLogs),
+    "",
+    "タスク完了状況",
+    ...(taskLines.length ? taskLines : ["タスクなし"]),
     "",
     "振り返り",
     `・タスク達成率 ${summary.reflection.achievementRate}%`,
@@ -245,6 +256,14 @@ function TaskPanel({ date, tasks, onMutate }) {
 }
 
 function GoogleCalendarPanel({ date, googleSync, setMessage, onMutate }) {
+  const [googleConfig, setGoogleConfig] = useState(null);
+
+  useEffect(() => {
+    api("/google/config")
+      .then(setGoogleConfig)
+      .catch((error) => setMessage(error.message));
+  }, [setMessage]);
+
   async function connectGoogle() {
     try {
       const data = await api("/google/auth-url");
@@ -258,10 +277,27 @@ function GoogleCalendarPanel({ date, googleSync, setMessage, onMutate }) {
     }
   }
 
+  async function copyRedirectUri() {
+    if (!googleConfig?.redirectUri) return;
+    await navigator.clipboard.writeText(googleConfig.redirectUri);
+    setMessage("Google OAuth のリダイレクトURIをコピーしました");
+  }
+
   return (
     <article className="card">
       <h2>📅 Googleカレンダー</h2>
       <p className="muted">Google連携後は、対象日を開くたびに一定間隔で自動同期します。今すぐ反映したい場合は「今すぐ同期」を押してください。</p>
+      {googleConfig?.redirectUri && (
+        <div className="oauthHint">
+          <strong>redirect_uri_mismatch が出る場合</strong>
+          <p>Google Cloud Console の「承認済みのリダイレクト URI」に、以下を完全一致で登録してください。</p>
+          <code>{googleConfig.redirectUri}</code>
+          {googleConfig.ignoredConfiguredRedirectUri && (
+            <p className="warning compact">古い GOOGLE_REDIRECT_URI（{googleConfig.ignoredConfiguredRedirectUri}）は現在のアクセス元と違うため無視しています。</p>
+          )}
+          <button className="ghost" onClick={copyRedirectUri}>URIをコピー</button>
+        </div>
+      )}
       <div className="actions">
         <button onClick={connectGoogle}>Google連携</button>
         <button onClick={() => onMutate(
