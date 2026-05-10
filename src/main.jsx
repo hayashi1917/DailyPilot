@@ -407,17 +407,28 @@ function ReflectionForm({ reflection, onSave }) {
   );
 }
 
-function ExportPanel({ exportText, setMessage }) {
-  async function copyText() {
-    await navigator.clipboard.writeText(exportText);
-    setMessage("コピーしました");
+function ExportPanel({ targetExportText, actualExportText, setMessage }) {
+  async function copyText(label, text) {
+    await navigator.clipboard.writeText(text);
+    setMessage(`${label}をコピーしました`);
   }
 
   return (
     <section className="card exportCard">
       <h2>📋 テキスト出力</h2>
-      <textarea value={exportText} readOnly />
-      <button onClick={copyText}>クリップボードにコピー</button>
+      <p className="muted">目標（予定）と実際（タスク完了状況・リアルタイム計測・振り返り）を別々に出力します。</p>
+      <div className="exportSplit">
+        <div className="exportPane">
+          <h3>🎯 目標</h3>
+          <textarea value={targetExportText} readOnly aria-label="目標テキスト出力" />
+          <button onClick={() => copyText("目標", targetExportText)}>目標をコピー</button>
+        </div>
+        <div className="exportPane">
+          <h3>📈 実際</h3>
+          <textarea value={actualExportText} readOnly aria-label="実際テキスト出力" />
+          <button onClick={() => copyText("実際", actualExportText)}>実際をコピー</button>
+        </div>
+      </div>
     </section>
   );
 }
@@ -428,6 +439,7 @@ function App() {
   const [date, setDate] = useState(TODAY);
   const [summary, setSummary] = useState(null);
   const [message, setMessage] = useState("");
+  const [currentTime, setCurrentTime] = useState(() => new Date());
 
   // 初回表示時にセッションCookieからログイン状態を復元します。
   useEffect(() => {
@@ -440,6 +452,12 @@ function App() {
   useEffect(() => {
     if (user) loadSummary();
   }, [user, date]);
+
+  // 実行中タイマーの経過分数をテキスト出力へ反映するため、定期的に現在時刻を更新します。
+  useEffect(() => {
+    const timerId = window.setInterval(() => setCurrentTime(new Date()), 30000);
+    return () => window.clearInterval(timerId);
+  }, []);
 
   async function loadSummary() {
     const data = await api(`/days/${date}`);
@@ -466,7 +484,8 @@ function App() {
     }
   }
 
-  const exportText = useMemo(() => (summary ? buildExportText(summary) : ""), [summary]);
+  const targetExportText = useMemo(() => (summary ? buildTargetExportText(summary) : ""), [summary]);
+  const actualExportText = useMemo(() => (summary ? buildActualExportText(summary, currentTime) : ""), [summary, currentTime]);
   const overlaps = summary ? hasScheduleOverlap(summary.schedule) : false;
 
   if (checkingAuth) return <main className="loading">読み込み中...</main>;
@@ -499,7 +518,7 @@ function App() {
         <TimerAndReflectionPanel date={date} actualLogs={summary.actualLogs} reflection={summary.reflection} onMutate={mutate} />
       </section>
 
-      <ExportPanel exportText={exportText} setMessage={setMessage} />
+      <ExportPanel targetExportText={targetExportText} actualExportText={actualExportText} setMessage={setMessage} />
     </main>
   );
 }

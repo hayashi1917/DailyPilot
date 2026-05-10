@@ -47,5 +47,8 @@ h2 { display: flex; align-items: center; gap: 0.5rem; margin: 0 0 1rem; }
 .logs span { color: #63708d; }
 .reflection { display: grid; gap: 10px; }
 .reflection label { display: grid; gap: 6px; color: #405075; font-weight: 700; }
-.exportCard textarea { width: 100%; min-height: 360px; line-height: 1.7; margin-bottom: 14px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-@media (max-width: 900px) { main { padding: 16px; } .hero, .grid.two { grid-template-columns: 1fr; display: grid; } .inlineForm, .task, .block, .logs > div { grid-template-columns: 1fr; display: grid; } }
+.exportSplit { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.exportPane { display: grid; gap: 12px; }
+.exportPane h3 { margin: 0; color: #172033; }
+.exportCard textarea { width: 100%; min-height: 360px; line-height: 1.7; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+@media (max-width: 900px) { main { padding: 16px; } .hero, .grid.two, .exportSplit { grid-template-columns: 1fr; display: grid; } .inlineForm, .task, .block, .logs > div { grid-template-columns: 1fr; display: grid; } }
