@@ -22,10 +22,11 @@ const GOOGLE_PROVIDER = "google";
 const PASSWORD_HASH_ITERATIONS = 100000;
 
 // Cloudflare Pages Functions から返すJSONレスポンスを標準化します。
-const json = (data, init = {}) => new Response(JSON.stringify(data), {
-  ...init,
-  headers: { "content-type": "application/json; charset=utf-8", ...(init.headers || {}) },
-});
+function json(data, init = {}) {
+  const headers = new Headers(init.headers);
+  if (!headers.has("content-type")) headers.set("content-type", "application/json; charset=utf-8");
+  return new Response(JSON.stringify(data), { ...init, headers });
+}
 const badRequest = (message) => json({ error: message }, { status: 400 });
 // Drizzle ORM のD1アダプタを生成します。SQL文字列を直接組み立てず、schema定義を経由してDBにアクセスします。
 function db(env) {
