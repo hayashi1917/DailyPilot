@@ -506,8 +506,8 @@ function App() {
       <header className="hero">
         <div>
           <p className="eyebrow">DailyPilot</p>
-          <h1>目標スケジュール・実績・振り返りを1画面で作成</h1>
-          <p>ログイン中: {user.email} / Googleカレンダーは日次画面の読み込み時に自動同期されます。</p>
+          <h1>一日の設計と振り返りを、静かに整える</h1>
+          <p>ログイン中: {user.email} / 目標、実績、Googleカレンダーを一つの流れで確認できます。</p>
         </div>
         <div className="headerActions">
           <label>対象日<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
