@@ -76,8 +76,19 @@
 
       <section class="card exportCard">
         <h2>📋 テキスト出力</h2>
-        <textarea id="exportText" readonly></textarea>
-        <button id="copyText">クリップボードにコピー</button>
+        <p class="muted">目標（予定）と実際（タスク完了状況・リアルタイム計測・振り返り）を別々に出力します。</p>
+        <div class="exportSplit">
+          <div class="exportPane">
+            <h3>🎯 目標</h3>
+            <textarea id="targetExportText" readonly aria-label="目標テキスト出力"></textarea>
+            <button id="copyTargetText">目標をコピー</button>
+          </div>
+          <div class="exportPane">
+            <h3>📈 実際</h3>
+            <textarea id="actualExportText" readonly aria-label="実際テキスト出力"></textarea>
+            <button id="copyActualText">実際をコピー</button>
+          </div>
+        </div>
       </section>
     </main>
     <script type="module" src="/app.js"></script>
