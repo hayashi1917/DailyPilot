@@ -80,44 +80,11 @@ function buildActualScheduleLines(actualLogs) {
 }
 
 function buildExportText(summary) {
-  const lines = [`【${japaneseDate(summary.day.date)}タスクマネジメント】`];
   const taskLines = buildTaskLines(summary.tasks);
-
-  if (taskLines.length) lines.push(...taskLines);
-
-function buildTargetExportText(summary) {
-  const targetTaskLines = buildTaskLines(summary.tasks, { includeStatusMarks: false });
-  const lines = [
-    `【${japaneseDate(summary.day.date)} 目標】`,
-    "目標タスク",
-    ...(targetTaskLines.length ? targetTaskLines : ["タスクなし"]),
-    "",
-    "目標スケジュール",
-    ...buildTargetScheduleLines(summary.schedule),
-  ];
-
-  return lines.join("\n");
-}
-
-function buildActualExportText(summary, now = new Date()) {
-  const actualTaskLines = buildTaskLines(summary.tasks);
-  const lines = [
-    `【${japaneseDate(summary.day.date)} 実際】`,
-    "タスク完了状況",
-    ...(actualTaskLines.length ? actualTaskLines : ["タスクなし"]),
-    "",
-    "実際のスケジュール（リアルタイム計測）",
-    ...buildActualScheduleLines(summary.actualLogs, now),
-    "",
-    "理想の1日のスケジュール",
-    ...buildIdealScheduleLines(summary.schedule),
-    "",
-    "実際に過ごした1日のスケジュール",
-    ...buildActualScheduleLines(summary.actualLogs),
-    "",
-    "タスク完了状況",
-    ...(taskLines.length ? taskLines : ["タスクなし"]),
-    "",
+  const idealScheduleLines = buildIdealScheduleLines(summary.schedule);
+  const actualScheduleLines = buildActualScheduleLines(summary.actualLogs);
+  const completionLines = taskLines.length ? taskLines : ["タスクなし"];
+  const reflectionLines = [
     "振り返り",
     `・タスク達成率 ${summary.reflection.achievementRate}%`,
     "・理由",
@@ -126,10 +93,24 @@ function buildActualExportText(summary, now = new Date()) {
     summary.reflection.improvement || "未入力",
   ];
 
-  if (summary.reflection.goodPoints) lines.push("・良かった点", summary.reflection.goodPoints);
-  if (summary.reflection.tomorrowNotes) lines.push("・明日へのメモ", summary.reflection.tomorrowNotes);
+  if (summary.reflection.goodPoints) reflectionLines.push("・良かった点", summary.reflection.goodPoints);
+  if (summary.reflection.tomorrowNotes) reflectionLines.push("・明日へのメモ", summary.reflection.tomorrowNotes);
 
-  return lines.join("\n");
+  return [
+    `【${japaneseDate(summary.day.date)}タスクマネジメント】`,
+    ...taskLines,
+    "",
+    "理想の1日のスケジュール",
+    ...idealScheduleLines,
+    "",
+    "実際に過ごした1日のスケジュール",
+    ...actualScheduleLines,
+    "",
+    "タスク完了状況",
+    ...completionLines,
+    "",
+    ...reflectionLines,
+  ].join("\n");
 }
 
 function AuthScreen({ onAuthenticated }) {
