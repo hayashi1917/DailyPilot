@@ -50,40 +50,54 @@ function formatLogTime(value) {
   });
 }
 
-function buildTaskLines(tasks) {
+function buildTaskLines(tasks, { includeStatusMarks = true } = {}) {
   return PRIORITIES.flatMap((priority) => {
     const priorityTasks = tasks.filter((task) => task.priority === priority);
     if (priorityTasks.length === 0) return [];
 
     const separator = priority === "A" ? "." : ",";
     const taskText = priorityTasks
-      .map((task) => `${task.title}${STATUS_MARKS[task.status]}`)
+      .map((task) => `${task.title}${includeStatusMarks ? STATUS_MARKS[task.status] : ""}`)
       .join(separator);
     return [`${priority}：${taskText}`];
   });
 }
 
-function buildIdealScheduleLines(schedule) {
-  if (schedule.length === 0) return ["予定なし"];
+function buildTargetScheduleLines(schedule) {
+  if (schedule.length === 0) return ["（目標スケジュール未登録）"];
   return schedule.map((block) => `${block.startTime} - ${block.endTime} ${block.title}`);
 }
 
-function buildActualScheduleLines(actualLogs) {
-  if (actualLogs.length === 0) return ["実績ログなし"];
+function buildActualScheduleLines(actualLogs, now = new Date()) {
+  if (actualLogs.length === 0) return ["（実際のスケジュール未記録）"];
 
   return actualLogs.map((log) => {
     const start = formatLogTime(log.startedAt);
-    const end = log.endedAt ? formatLogTime(log.endedAt) : "実行中";
-    const duration = log.durationMinutes ? `（${log.durationMinutes}分）` : "";
+    const isRunning = !log.endedAt;
+    const end = isRunning ? "実行中" : formatLogTime(log.endedAt);
+    const durationMinutes = isRunning
+      ? Math.max(1, Math.round((now.getTime() - new Date(log.startedAt).getTime()) / 60000))
+      : log.durationMinutes;
+    const duration = durationMinutes ? `（${isRunning ? "経過" : ""}${durationMinutes}分）` : "";
     return `${start} - ${end} ${log.title}${duration}`;
   });
 }
 
-function buildExportText(summary) {
-  const taskLines = buildTaskLines(summary.tasks);
-  const idealScheduleLines = buildIdealScheduleLines(summary.schedule);
-  const actualScheduleLines = buildActualScheduleLines(summary.actualLogs);
-  const completionLines = taskLines.length ? taskLines : ["タスクなし"];
+function buildTargetExportText(summary) {
+  const targetTaskLines = buildTaskLines(summary.tasks, { includeStatusMarks: false });
+
+  return [
+    `【${japaneseDate(summary.day.date)} 目標】`,
+    "目標タスク",
+    ...(targetTaskLines.length ? targetTaskLines : ["タスクなし"]),
+    "",
+    "目標スケジュール",
+    ...buildTargetScheduleLines(summary.schedule),
+  ].join("\n");
+}
+
+function buildActualExportText(summary, now = new Date()) {
+  const actualTaskLines = buildTaskLines(summary.tasks);
   const reflectionLines = [
     "振り返り",
     `・タスク達成率 ${summary.reflection.achievementRate}%`,
@@ -97,17 +111,12 @@ function buildExportText(summary) {
   if (summary.reflection.tomorrowNotes) reflectionLines.push("・明日へのメモ", summary.reflection.tomorrowNotes);
 
   return [
-    `【${japaneseDate(summary.day.date)}タスクマネジメント】`,
-    ...taskLines,
-    "",
-    "理想の1日のスケジュール",
-    ...idealScheduleLines,
-    "",
-    "実際に過ごした1日のスケジュール",
-    ...actualScheduleLines,
-    "",
+    `【${japaneseDate(summary.day.date)} 実際】`,
     "タスク完了状況",
-    ...completionLines,
+    ...(actualTaskLines.length ? actualTaskLines : ["タスクなし"]),
+    "",
+    "実際のスケジュール（リアルタイム計測）",
+    ...buildActualScheduleLines(summary.actualLogs, now),
     "",
     ...reflectionLines,
   ].join("\n");
