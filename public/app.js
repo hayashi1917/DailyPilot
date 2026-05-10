@@ -30,17 +30,66 @@ function formatJapaneseDate(value) {
   return `${parsed.getMonth() + 1}月${parsed.getDate()}日`;
 }
 
+function field(value, camelName, snakeName) {
+  return value?.[camelName] ?? value?.[snakeName];
+}
+
+function buildTaskLines(tasks) {
+  return priorities.flatMap((priority) => {
+    const priorityTasks = tasks.filter((task) => task.priority === priority);
+    if (priorityTasks.length === 0) return [];
+    return [`${priority}：${priorityTasks.map((task) => `${task.title}${statusMarks[task.status]}`).join(priority === "A" ? "." : ",")}`];
+  });
+}
+
+function buildTargetScheduleLines(schedule) {
+  if (schedule.length === 0) return ["（目標スケジュール未登録）"];
+  return schedule.map((block) => `${field(block, "startTime", "start_time")} - ${field(block, "endTime", "end_time")} ${block.title}`);
+}
+
+function formatLogTime(value) {
+  return new Date(value).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Tokyo" });
+}
+
+function buildActualScheduleLines(actualLogs) {
+  if (actualLogs.length === 0) return ["（実際のスケジュール未記録）"];
+  return actualLogs.map((log) => {
+    const start = formatLogTime(field(log, "startedAt", "started_at"));
+    const endedAt = field(log, "endedAt", "ended_at");
+    const end = endedAt ? formatLogTime(endedAt) : "実行中";
+    const durationMinutes = field(log, "durationMinutes", "duration_minutes");
+    const duration = durationMinutes ? `（${durationMinutes}分）` : "";
+    return `${start} - ${end} ${log.title}${duration}`;
+  });
+}
+
 function buildExportText(data) {
   const lines = [`【${formatJapaneseDate(data.day.date)}タスクマネジメント】`];
-  priorities.forEach((priority) => {
-    const tasks = data.tasks.filter((task) => task.priority === priority);
-    if (tasks.length) lines.push(`${priority}：${tasks.map((task) => `${task.title}${statusMarks[task.status]}`).join(priority === "A" ? "." : ",")}`);
-  });
-  lines.push("");
-  data.schedule.forEach((block) => lines.push(`${block.start_time} - ${block.end_time} ${block.title}`));
-  lines.push("", "振り返り", `・タスク達成率 ${data.reflection.achievement_rate}%`, "・理由", data.reflection.reason || "未入力", "・改善点", data.reflection.improvement || "未入力");
-  if (data.reflection.good_points) lines.push("・良かった点", data.reflection.good_points);
-  if (data.reflection.tomorrow_notes) lines.push("・明日へのメモ", data.reflection.tomorrow_notes);
+  const taskLines = buildTaskLines(data.tasks);
+  if (taskLines.length) lines.push(...taskLines);
+
+  lines.push(
+    "",
+    "【目標スケジュール】",
+    ...buildTargetScheduleLines(data.schedule),
+    "",
+    "【実際のスケジュール】",
+    ...buildActualScheduleLines(data.actualLogs),
+    "",
+    "タスク完了状況",
+    ...(taskLines.length ? taskLines : ["タスクなし"]),
+    "",
+    "振り返り",
+    `・タスク達成率 ${field(data.reflection, "achievementRate", "achievement_rate")}%`,
+    "・理由",
+    data.reflection.reason || "未入力",
+    "・改善点",
+    data.reflection.improvement || "未入力",
+  );
+  const goodPoints = field(data.reflection, "goodPoints", "good_points");
+  const tomorrowNotes = field(data.reflection, "tomorrowNotes", "tomorrow_notes");
+  if (goodPoints) lines.push("・良かった点", goodPoints);
+  if (tomorrowNotes) lines.push("・明日へのメモ", tomorrowNotes);
   return lines.join("\n");
 }
 

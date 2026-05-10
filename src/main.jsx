@@ -63,13 +63,13 @@ function buildTaskLines(tasks) {
   });
 }
 
-function buildIdealScheduleLines(schedule) {
-  if (schedule.length === 0) return ["予定なし"];
+function buildTargetScheduleLines(schedule) {
+  if (schedule.length === 0) return ["（目標スケジュール未登録）"];
   return schedule.map((block) => `${block.startTime} - ${block.endTime} ${block.title}`);
 }
 
 function buildActualScheduleLines(actualLogs) {
-  if (actualLogs.length === 0) return ["実績ログなし"];
+  if (actualLogs.length === 0) return ["（実際のスケジュール未記録）"];
 
   return actualLogs.map((log) => {
     const start = formatLogTime(log.startedAt);
@@ -87,10 +87,10 @@ function buildExportText(summary) {
 
   lines.push(
     "",
-    "理想の1日のスケジュール",
-    ...buildIdealScheduleLines(summary.schedule),
+    "【目標スケジュール】",
+    ...buildTargetScheduleLines(summary.schedule),
     "",
-    "実際に過ごした1日のスケジュール",
+    "【実際のスケジュール】",
     ...buildActualScheduleLines(summary.actualLogs),
     "",
     "タスク完了状況",
