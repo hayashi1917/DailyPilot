@@ -17,6 +17,9 @@ import {
 const SESSION_COOKIE = "daily_pilot_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 const GOOGLE_PROVIDER = "google";
+// Cloudflare Workers の Web Crypto は PBKDF2 の反復回数が 100,000 回までに制限されています。
+// そのため上限値の 100,000 回を明示的に使い、作成済みハッシュにも回数を保存します。
+const PASSWORD_HASH_ITERATIONS = 100000;
 
 // Cloudflare Pages Functions から返すJSONレスポンスを標準化します。
 const json = (data, init = {}) => new Response(JSON.stringify(data), {
@@ -53,19 +56,27 @@ function base64ToBytes(value) {
 }
 
 // パスワードは平文保存せず、PBKDF2 + ランダムソルトでハッシュ化します。
+async function derivePasswordHash(password, salt, iterations) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations, hash: "SHA-256" }, key, 256);
+  return bytesToBase64(bits);
+}
+
 async function hashPassword(password) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations: 120000, hash: "SHA-256" }, key, 256);
-  return `${bytesToBase64(salt)}:${bytesToBase64(bits)}`;
+  const hash = await derivePasswordHash(password, salt, PASSWORD_HASH_ITERATIONS);
+  return `pbkdf2:${PASSWORD_HASH_ITERATIONS}:${bytesToBase64(salt)}:${hash}`;
 }
 
 async function verifyPassword(password, stored) {
-  const [saltValue, hashValue] = stored.split(":");
+  const parts = stored.split(":");
+  const [_algorithm, iterationsValue, saltValue, hashValue] = parts.length === 4
+    ? parts
+    : ["pbkdf2", String(PASSWORD_HASH_ITERATIONS), parts[0], parts[1]];
+  const iterations = Math.min(Number(iterationsValue), PASSWORD_HASH_ITERATIONS);
   const salt = base64ToBytes(saltValue);
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations: 120000, hash: "SHA-256" }, key, 256);
-  return bytesToBase64(bits) === hashValue;
+  const hash = await derivePasswordHash(password, salt, iterations);
+  return hash === hashValue;
 }
 
 // Google OAuthトークンはD1保存前にAES-GCMで暗号化します。
