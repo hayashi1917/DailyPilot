@@ -1,5 +1,5 @@
 import { drizzle } from "drizzle-orm/d1";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import {
   actualLogs,
   calendarAccounts,
@@ -146,8 +146,47 @@ function calculateAchievement(taskRows) {
   return Math.round((achieved / totalWeight) * 100);
 }
 
+function isValidDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+}
+
+function isValidTime(value) {
+  return /^\d{2}:\d{2}$/.test(String(value || ""));
+}
+
+function timeToMinutes(value) {
+  const [hour, minute] = String(value || "").split(":").map(Number);
+  return hour * 60 + minute;
+}
+
+function normalizeScheduleBody(body) {
+  return {
+    date: body.date,
+    title: String(body.title || "").trim(),
+    startTime: body.startTime || body.start_time,
+    endTime: body.endTime || body.end_time,
+    source: body.source || "manual",
+    externalEventId: body.externalEventId || body.external_event_id || null,
+    scheduleBlockId: body.scheduleBlockId || body.schedule_block_id || null,
+  };
+}
+
+function validateScheduleInput({ date, title, startTime, endTime }) {
+  if (!isValidDate(date)) return "Invalid date";
+  if (!title) return "Schedule title is required";
+  if (!isValidTime(startTime) || !isValidTime(endTime)) return "開始時刻と終了時刻をHH:MM形式で指定してください";
+  if (timeToMinutes(startTime) >= timeToMinutes(endTime)) return "終了時刻は開始時刻より後にしてください";
+  return null;
+}
+
+function addDays(date, daysToAdd) {
+  const parsed = new Date(`${date}T00:00:00.000Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + daysToAdd);
+  return parsed.toISOString().slice(0, 10);
+}
+
 function localDateRange(date) {
-  return { start: `${date}T00:00:00+09:00`, end: `${date}T23:59:59+09:00` };
+  return { start: `${date}T00:00:00+09:00`, end: `${addDays(date, 1)}T00:00:00+09:00` };
 }
 
 function timeFromGoogle(value, fallback) {
@@ -245,6 +284,7 @@ async function getGoogleAccessToken(env, request, userId) {
 }
 
 async function fetchGoogleEvents(accessToken, date) {
+  if (!isValidDate(date)) throw new Error("Invalid date");
   const range = localDateRange(date);
   const eventsUrl = new URL("https://www.googleapis.com/calendar/v3/calendars/primary/events");
   eventsUrl.search = new URLSearchParams({ singleEvents: "true", orderBy: "startTime", timeMin: range.start, timeMax: range.end }).toString();
@@ -268,16 +308,34 @@ async function autoSyncGoogle(env, request, userId, date, dayId, force = false) 
   const events = await fetchGoogleEvents(accessToken, date);
   for (const event of events) {
     if (!event.id) continue;
+    const title = event.summary || "Google予定";
+    const startTime = timeFromGoogle(event.start?.dateTime, `${event.start?.date}T00:00:00`);
+    const endTime = timeFromGoogle(event.end?.dateTime, `${event.end?.date}T23:59:00`);
+    const existing = await appDb.select().from(scheduleBlocks).where(and(eq(scheduleBlocks.userId, userId), eq(scheduleBlocks.externalEventId, event.id))).get();
+    if (!existing) {
+      const matchingLocal = await appDb.select().from(scheduleBlocks).where(and(
+        eq(scheduleBlocks.userId, userId),
+        eq(scheduleBlocks.dayId, dayId),
+        eq(scheduleBlocks.title, title),
+        eq(scheduleBlocks.startTime, startTime),
+        eq(scheduleBlocks.endTime, endTime),
+        isNull(scheduleBlocks.externalEventId),
+      )).get();
+      if (matchingLocal) {
+        await appDb.update(scheduleBlocks).set({ source: "google_calendar", externalEventId: event.id, updatedAt: sql`CURRENT_TIMESTAMP` }).where(and(eq(scheduleBlocks.userId, userId), eq(scheduleBlocks.id, matchingLocal.id))).run();
+        continue;
+      }
+    }
     await appDb.insert(scheduleBlocks).values({
       dayId,
       userId,
-      title: event.summary || "Google予定",
-      startTime: timeFromGoogle(event.start?.dateTime, `${event.start?.date}T00:00:00`),
-      endTime: timeFromGoogle(event.end?.dateTime, `${event.end?.date}T23:59:00`),
+      title,
+      startTime,
+      endTime,
       source: "google_calendar",
       externalEventId: event.id,
       sortOrder: 0,
-    }).onConflictDoUpdate({ target: [scheduleBlocks.userId, scheduleBlocks.externalEventId], set: { title: event.summary || "Google予定", startTime: timeFromGoogle(event.start?.dateTime, `${event.start?.date}T00:00:00`), endTime: timeFromGoogle(event.end?.dateTime, `${event.end?.date}T23:59:00`), updatedAt: sql`CURRENT_TIMESTAMP` } }).run();
+    }).onConflictDoUpdate({ target: [scheduleBlocks.userId, scheduleBlocks.externalEventId], set: { dayId, title, startTime, endTime, source: "google_calendar", updatedAt: sql`CURRENT_TIMESTAMP` } }).run();
   }
   await appDb.insert(calendarSyncs).values({ userId, provider: GOOGLE_PROVIDER, date, syncedAt: now }).onConflictDoUpdate({ target: [calendarSyncs.userId, calendarSyncs.provider, calendarSyncs.date], set: { syncedAt: now, updatedAt: sql`CURRENT_TIMESTAMP` } }).run();
   return { connected: true, synced: true, lastSyncedAt: now };
@@ -388,11 +446,12 @@ async function handleApi({ request, env }) {
 
     // 予定ブロック作成
     if (request.method === "POST" && path === "/schedule") {
-      const body = await request.json();
-      if (!body.title?.trim()) return badRequest("Schedule title is required");
-      const day = await ensureDay(appDb, user.id, body.date);
-      await appDb.insert(scheduleBlocks).values({ dayId: day.id, userId: user.id, title: body.title.trim(), startTime: body.startTime, endTime: body.endTime, source: body.source || "manual", externalEventId: body.externalEventId || null, sortOrder: 0 }).run();
-      return json(await getDaySummary(env, request, user.id, body.date));
+      const schedule = normalizeScheduleBody(await request.json());
+      const validationError = validateScheduleInput(schedule);
+      if (validationError) return badRequest(validationError);
+      const day = await ensureDay(appDb, user.id, schedule.date);
+      await appDb.insert(scheduleBlocks).values({ dayId: day.id, userId: user.id, title: schedule.title, startTime: schedule.startTime, endTime: schedule.endTime, source: schedule.source, externalEventId: schedule.externalEventId, sortOrder: 0 }).run();
+      return json(await getDaySummary(env, request, user.id, schedule.date));
     }
 
     if (request.method === "PATCH" && path.startsWith("/schedule/")) {
@@ -470,22 +529,29 @@ async function handleApi({ request, env }) {
 
     if (request.method === "POST" && path === "/google/sync") {
       const body = await request.json();
+      if (!isValidDate(body.date)) return badRequest("Invalid date");
       const day = await ensureDay(appDb, user.id, body.date);
       return json(await autoSyncGoogle(env, request, user.id, body.date, day.id, Boolean(body.force)));
     }
 
     // DailyPilotの予定をGoogleカレンダーへ追加します。
     if (request.method === "POST" && path === "/google/events") {
-      const body = await request.json();
+      const schedule = normalizeScheduleBody(await request.json());
+      const validationError = validateScheduleInput(schedule);
+      if (validationError) return badRequest(validationError);
       const accessToken = await getGoogleAccessToken(env, request, user.id);
       if (!accessToken) return json({ error: "Google Calendar is not connected" }, { status: 401 });
       const response = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
         method: "POST",
         headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
-        body: JSON.stringify({ summary: body.title, start: { dateTime: `${body.date}T${body.startTime}:00+09:00` }, end: { dateTime: `${body.date}T${body.endTime}:00+09:00` } }),
+        body: JSON.stringify({ summary: schedule.title, start: { dateTime: `${schedule.date}T${schedule.startTime}:00+09:00` }, end: { dateTime: `${schedule.date}T${schedule.endTime}:00+09:00` } }),
       });
       if (!response.ok) return json({ error: await response.text() }, { status: 502 });
-      return json(await response.json());
+      const googleEvent = await response.json();
+      if (schedule.scheduleBlockId && googleEvent.id) {
+        await appDb.update(scheduleBlocks).set({ source: "google_calendar", externalEventId: googleEvent.id, updatedAt: sql`CURRENT_TIMESTAMP` }).where(and(eq(scheduleBlocks.userId, user.id), eq(scheduleBlocks.id, Number(schedule.scheduleBlockId)))).run();
+      }
+      return json(googleEvent);
     }
 
     return json({ error: "Not found" }, { status: 404 });

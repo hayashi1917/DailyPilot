@@ -145,7 +145,7 @@ function renderSchedule() {
       <span>${block.start_time} - ${block.end_time}</span>
       <strong>${escapeHtml(block.title)}</strong>
       <em>${block.source === "google_calendar" ? "Google" : "Manual"}</em>
-      <div><button class="pushGoogle">Googleへ追加</button><button class="ghost deleteSchedule">🗑️</button></div>
+      <div><button class="pushGoogle" ${block.external_event_id || block.externalEventId ? "disabled" : ""}>${block.external_event_id || block.externalEventId ? "Google連携済み" : "Googleへ追加"}</button><button class="ghost deleteSchedule">🗑️</button></div>
     </div>`).join("");
   document.querySelectorAll(".block").forEach((row) => {
     const block = summary.schedule.find((item) => String(item.id) === row.dataset.id);
@@ -258,7 +258,8 @@ async function importGoogleEvent(event) {
 }
 
 async function pushToGoogle(block) {
-  await api("/google/events", { method: "POST", body: JSON.stringify({ date, title: block.title, start_time: block.start_time, end_time: block.end_time }) });
+  await api("/google/events", { method: "POST", body: JSON.stringify({ schedule_block_id: block.id, date, title: block.title, start_time: block.start_time, end_time: block.end_time }) });
+  await load();
   toast("Googleカレンダーに追加しました");
 }
 
