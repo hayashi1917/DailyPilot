@@ -7,6 +7,7 @@ const PRIORITIES = ["S", "A", "B"];
 const STATUS_MARKS = { planned: "", done: "◯", partial: "△", missed: "☓" };
 const STATUS_LABELS = { planned: "未評価", done: "完了", partial: "一部", missed: "未達" };
 const TODAY = new Date().toISOString().slice(0, 10);
+const REMINDER_STORAGE_KEY = "dailyPilotReminderSettings";
 
 async function api(path, init = {}) {
   const response = await fetch(`/api${path}`, {
@@ -30,6 +31,22 @@ function japaneseDate(value) {
 function minutes(value) {
   const [hour, minute] = value.split(":").map(Number);
   return hour * 60 + minute;
+}
+
+function monthKey(value) {
+  return value.slice(0, 7);
+}
+
+function buildMonthCells(month) {
+  const first = new Date(`${month}-01T00:00:00.000Z`);
+  const startOffset = first.getUTCDay();
+  const cursor = new Date(first);
+  cursor.setUTCDate(cursor.getUTCDate() - startOffset);
+  return Array.from({ length: 42 }, () => {
+    const value = cursor.toISOString().slice(0, 10);
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+    return value;
+  });
 }
 
 function hasScheduleOverlap(schedule) {
@@ -302,6 +319,132 @@ function GoogleCalendarPanel({ date, googleSync, setMessage, onMutate }) {
   );
 }
 
+function CalendarMonthPanel({ date, onDateChange, schedule }) {
+  const [month, setMonth] = useState(monthKey(date));
+  const [markers, setMarkers] = useState({});
+
+  useEffect(() => setMonth(monthKey(date)), [date]);
+
+  useEffect(() => {
+    let active = true;
+    api(`/calendar/month?month=${month}`)
+      .then((data) => {
+        if (!active) return;
+        setMarkers(Object.fromEntries(data.days.map((day) => [day.date, day])));
+      })
+      .catch(() => {
+        if (active) setMarkers({});
+      });
+    return () => { active = false; };
+  }, [month, schedule]);
+
+  return (
+    <article className="card calendarCard">
+      <div className="calendarHeader">
+        <h2>📆 カレンダービュー</h2>
+        <input type="month" value={month} onChange={(event) => setMonth(event.target.value)} />
+      </div>
+      <p className="muted">予定入力がある日は日付の下に「・」を表示します。Google同期済み予定も対象です。</p>
+      <div className="calendarWeekdays">{["日", "月", "火", "水", "木", "金", "土"].map((day) => <span key={day}>{day}</span>)}</div>
+      <div className="calendarGrid">
+        {buildMonthCells(month).map((cellDate) => {
+          const marker = markers[cellDate];
+          const inMonth = monthKey(cellDate) === month;
+          return (
+            <button
+              type="button"
+              className={`calendarDay ${cellDate === date ? "selected" : ""} ${inMonth ? "" : "outside"}`}
+              key={cellDate}
+              onClick={() => onDateChange(cellDate)}
+              aria-label={`${cellDate}${marker?.hasSchedule ? " 予定あり" : ""}`}
+            >
+              <span>{Number(cellDate.slice(8, 10))}</span>
+              <strong className={marker?.hasSchedule ? "scheduleDot" : "emptyDot"}>・</strong>
+            </button>
+          );
+        })}
+      </div>
+    </article>
+  );
+}
+
+function WeeklyReviewPanel({ date, setMessage }) {
+  const [review, setReview] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function generateReview() {
+    setLoading(true);
+    try {
+      const data = await api(`/ai/weekly-review?date=${date}`);
+      setReview(data.review);
+      setMessage(data.generatedBy === "openai" ? "AIが1週間の振り返りを作成しました" : "ローカル要約で1週間の振り返りを作成しました");
+    } catch (error) {
+      setMessage(error.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <article className="card">
+      <h2>🤖 AIによる1週間の振り返り</h2>
+      <p className="muted">選択日を含む日曜〜土曜の記録から、タスク・予定・振り返りをまとめてレビューします。</p>
+      <button onClick={generateReview} disabled={loading}>{loading ? "作成中..." : "1週間の振り返りを作成"}</button>
+      {review && <textarea className="weeklyReview" value={review} readOnly aria-label="AIによる1週間の振り返り" />}
+    </article>
+  );
+}
+
+function ReminderPanel({ setMessage }) {
+  const [settings, setSettings] = useState(() => {
+    const saved = window.localStorage.getItem(REMINDER_STORAGE_KEY);
+    if (!saved) return { enabled: true, time: "21:30" };
+    try {
+      return JSON.parse(saved);
+    } catch {
+      return { enabled: true, time: "21:30" };
+    }
+  });
+
+  useEffect(() => {
+    window.localStorage.setItem(REMINDER_STORAGE_KEY, JSON.stringify(settings));
+  }, [settings]);
+
+  useEffect(() => {
+    if (!settings.enabled) return undefined;
+    const timer = window.setInterval(() => {
+      const now = new Date();
+      const current = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      if (current !== settings.time) return;
+      const text = "今日の振り返りと明日のスケジュール記入の時間です。Googleカレンダー同期も確認しましょう。";
+      if ("Notification" in window && window.Notification.permission === "granted") new window.Notification("DailyPilot リマインド", { body: text });
+      setMessage(text);
+    }, 60000);
+    return () => window.clearInterval(timer);
+  }, [settings, setMessage]);
+
+  async function enableNotifications() {
+    if (!("Notification" in window)) {
+      setMessage("このブラウザは通知に対応していません");
+      return;
+    }
+    const permission = await window.Notification.requestPermission();
+    setMessage(permission === "granted" ? "通知を有効にしました" : "通知が許可されませんでした");
+  }
+
+  return (
+    <article className="card reminderCard">
+      <h2>🔔 振り返り・明日の予定リマインド</h2>
+      <p className="muted">毎日指定時刻に、振り返りと明日のスケジュール入力を促します。Googleカレンダー連携済みなら同期確認も忘れずに行えます。</p>
+      <div className="inlineForm">
+        <input type="time" value={settings.time} onChange={(event) => setSettings({ ...settings, time: event.target.value })} />
+        <button onClick={() => setSettings({ ...settings, enabled: !settings.enabled })}>{settings.enabled ? "リマインドON" : "リマインドOFF"}</button>
+        <button className="ghost" onClick={enableNotifications}>通知を許可</button>
+      </div>
+    </article>
+  );
+}
+
 function SchedulePanel({ date, schedule, overlaps, onMutate }) {
   const [draft, setDraft] = useState({ title: "", startTime: "09:00", endTime: "10:00" });
 
@@ -526,9 +669,16 @@ function App() {
       </section>
 
       <section className="grid two">
+        <CalendarMonthPanel date={date} onDateChange={setDate} schedule={summary.schedule} />
+        <ReminderPanel setMessage={setMessage} />
+      </section>
+
+      <section className="grid two">
         <SchedulePanel date={date} schedule={summary.schedule} overlaps={overlaps} onMutate={mutate} />
         <TimerAndReflectionPanel date={date} actualLogs={summary.actualLogs} reflection={summary.reflection} onMutate={mutate} />
       </section>
+
+      <WeeklyReviewPanel date={date} setMessage={setMessage} />
 
       <ExportPanel targetExportText={targetExportText} actualExportText={actualExportText} setMessage={setMessage} />
     </main>
