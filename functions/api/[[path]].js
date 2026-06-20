@@ -1,5 +1,5 @@
 import { drizzle } from "drizzle-orm/d1";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, gte, isNull, lte, sql } from "drizzle-orm";
 import {
   actualLogs,
   calendarAccounts,
@@ -211,6 +211,24 @@ function addDays(date, daysToAdd) {
   return parsed.toISOString().slice(0, 10);
 }
 
+function monthRange(month) {
+  if (!/^\d{4}-\d{2}$/.test(String(month || ""))) return null;
+  const start = `${month}-01`;
+  const endDate = new Date(`${start}T00:00:00.000Z`);
+  endDate.setUTCMonth(endDate.getUTCMonth() + 1);
+  endDate.setUTCDate(endDate.getUTCDate() - 1);
+  return { start, end: endDate.toISOString().slice(0, 10) };
+}
+
+function weekRange(date) {
+  const parsed = new Date(`${date}T00:00:00.000Z`);
+  const day = parsed.getUTCDay();
+  parsed.setUTCDate(parsed.getUTCDate() - day);
+  const start = parsed.toISOString().slice(0, 10);
+  parsed.setUTCDate(parsed.getUTCDate() + 6);
+  return { start, end: parsed.toISOString().slice(0, 10) };
+}
+
 function localDateRange(date) {
   return { start: `${date}T00:00:00+09:00`, end: `${addDays(date, 1)}T00:00:00+09:00` };
 }
@@ -368,6 +386,54 @@ async function autoSyncGoogle(env, request, userId, date, dayId, force = false) 
 }
 
 // フロントエンドが1回のAPI呼び出しで描画できるよう、日次画面に必要な情報をまとめて返します。
+async function getCalendarMonth(env, request, userId, month) {
+  const range = monthRange(month);
+  if (!range) throw new Error("Invalid month");
+  const appDb = db(env);
+  const rows = await appDb.select({ date: days.date, scheduleCount: sql`COUNT(${scheduleBlocks.id})` })
+    .from(days)
+    .leftJoin(scheduleBlocks, and(eq(scheduleBlocks.dayId, days.id), eq(scheduleBlocks.userId, userId)))
+    .where(and(eq(days.userId, userId), gte(days.date, range.start), lte(days.date, range.end)))
+    .groupBy(days.date)
+    .all();
+  return { month, days: rows.map((row) => ({ date: row.date, hasSchedule: Number(row.scheduleCount) > 0, scheduleCount: Number(row.scheduleCount) })) };
+}
+
+function buildWeeklyReviewPrompt(summaries) {
+  return [`DailyPilotの1週間の記録を日本語で振り返ってください。`, `出力は「総評」「良かった点」「改善点」「来週の一手」の4項目で簡潔にしてください。`, JSON.stringify(summaries)].join("\n");
+}
+
+function buildLocalWeeklyReview(summaries) {
+  const taskCount = summaries.reduce((sum, item) => sum + item.tasks.length, 0);
+  const doneCount = summaries.reduce((sum, item) => sum + item.tasks.filter((task) => task.status === "done").length, 0);
+  const scheduleCount = summaries.reduce((sum, item) => sum + item.schedule.length, 0);
+  const avgAchievement = summaries.length ? Math.round(summaries.reduce((sum, item) => sum + item.reflection.achievementRate, 0) / summaries.length) : 0;
+  return [`総評: 今週は${taskCount}件のタスク中${doneCount}件を完了し、平均達成率は${avgAchievement}%でした。予定入力は${scheduleCount}件です。`, `良かった点: 完了したタスクと実績ログを確認し、再現したい行動を振り返り欄へ残しましょう。`, `改善点: 未完了タスクが多い日は、翌日のスケジュールに着手時間を先に確保すると改善しやすくなります。`, `来週の一手: 毎晩、振り返りと明日の予定入力をセットで行い、Googleカレンダー同期後に抜け漏れを確認しましょう。`].join("\n");
+}
+
+async function getWeeklyReview(env, request, userId, date) {
+  if (!isValidDate(date)) throw new Error("Invalid date");
+  const range = weekRange(date);
+  const summaries = [];
+  for (let current = range.start; current <= range.end; current = addDays(current, 1)) {
+    const summary = await getDaySummary(env, request, userId, current);
+    summaries.push({ date: current, tasks: summary.tasks, schedule: summary.schedule, actualLogs: summary.actualLogs, reflection: summary.reflection });
+  }
+  if (env.OPENAI_API_KEY) {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: env.OPENAI_MODEL || "gpt-4.1-mini", input: buildWeeklyReviewPrompt(summaries) }),
+    });
+    if (response.ok) {
+      const data = await response.json();
+      const text = data.output_text || data.output?.flatMap((item) => item.content || []).map((content) => content.text).filter(Boolean).join("\n");
+      if (text) return { ...range, review: text, generatedBy: "openai" };
+    }
+  }
+  return { ...range, review: buildLocalWeeklyReview(summaries), generatedBy: "local" };
+}
+
 async function getDaySummary(env, request, userId, date) {
   const appDb = db(env);
   const day = await ensureDay(appDb, userId, date);
@@ -440,6 +506,19 @@ async function handleApi({ request, env }) {
 
     const user = await requireUser(env, request).catch((response) => response);
     if (user instanceof Response) return user;
+
+    if (request.method === "GET" && path === "/calendar/month") {
+      const month = url.searchParams.get("month") || "";
+      const range = monthRange(month);
+      if (!range) return badRequest("Invalid month");
+      return json(await getCalendarMonth(env, request, user.id, month));
+    }
+
+    if (request.method === "GET" && path === "/ai/weekly-review") {
+      const targetDate = url.searchParams.get("date") || "";
+      if (!isValidDate(targetDate)) return badRequest("Invalid date");
+      return json(await getWeeklyReview(env, request, user.id, targetDate));
+    }
 
     // 日次サマリー取得。ここでGoogleカレンダー自動同期も実行します。
     if (request.method === "GET" && path.startsWith("/days/")) {
