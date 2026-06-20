@@ -159,6 +159,32 @@ function timeToMinutes(value) {
   return hour * 60 + minute;
 }
 
+
+function dateTimeToIso(date, time) {
+  return new Date(`${date}T${time}:00+09:00`).toISOString();
+}
+
+function minutesBetween(startedAt, endedAt) {
+  return Math.max(1, Math.round((new Date(endedAt).getTime() - new Date(startedAt).getTime()) / 60000));
+}
+
+function normalizeActualLogBody(body) {
+  return {
+    date: body.date,
+    title: String(body.title || "").trim(),
+    startTime: body.startTime || body.start_time,
+    endTime: body.endTime || body.end_time,
+  };
+}
+
+function validateActualLogInput({ date, title, startTime, endTime }) {
+  if (!isValidDate(date)) return "Invalid date";
+  if (!title) return "Actual log title is required";
+  if (!isValidTime(startTime) || !isValidTime(endTime)) return "Invalid time";
+  if (timeToMinutes(startTime) >= timeToMinutes(endTime)) return "End time must be after start time";
+  return null;
+}
+
 function normalizeScheduleBody(body) {
   return {
     date: body.date,
@@ -463,6 +489,34 @@ async function handleApi({ request, env }) {
 
     if (request.method === "DELETE" && path.startsWith("/schedule/")) {
       await appDb.delete(scheduleBlocks).where(and(eq(scheduleBlocks.userId, user.id), eq(scheduleBlocks.id, Number(path.split("/")[2])))).run();
+      return json({ ok: true });
+    }
+
+    // 実績ログ手入力。タイマーを使わなかった作業も後から実績に追加できます。
+    if (request.method === "POST" && path === "/actual-logs") {
+      const log = normalizeActualLogBody(await request.json());
+      const validationError = validateActualLogInput(log);
+      if (validationError) return badRequest(validationError);
+      const day = await ensureDay(appDb, user.id, log.date);
+      const startedAt = dateTimeToIso(log.date, log.startTime);
+      const endedAt = dateTimeToIso(log.date, log.endTime);
+      await appDb.insert(actualLogs).values({ dayId: day.id, userId: user.id, title: log.title, startedAt, endedAt, durationMinutes: minutesBetween(startedAt, endedAt) }).run();
+      return json(await getDaySummary(env, request, user.id, log.date));
+    }
+
+    if (request.method === "PATCH" && path.startsWith("/actual-logs/")) {
+      const id = Number(path.split("/")[2]);
+      const log = normalizeActualLogBody(await request.json());
+      const validationError = validateActualLogInput(log);
+      if (validationError) return badRequest(validationError);
+      const startedAt = dateTimeToIso(log.date, log.startTime);
+      const endedAt = dateTimeToIso(log.date, log.endTime);
+      await appDb.update(actualLogs).set({ title: log.title, startedAt, endedAt, durationMinutes: minutesBetween(startedAt, endedAt) }).where(and(eq(actualLogs.userId, user.id), eq(actualLogs.id, id))).run();
+      return json(await getDaySummary(env, request, user.id, log.date));
+    }
+
+    if (request.method === "DELETE" && path.startsWith("/actual-logs/")) {
+      await appDb.delete(actualLogs).where(and(eq(actualLogs.userId, user.id), eq(actualLogs.id, Number(path.split("/")[2])))).run();
       return json({ ok: true });
     }
 
