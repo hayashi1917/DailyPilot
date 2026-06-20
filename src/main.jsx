@@ -494,13 +494,38 @@ function SchedulePanel({ date, schedule, overlaps, onMutate }) {
   );
 }
 
+function timeInputValue(value) {
+  return new Date(value).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Tokyo" });
+}
+
 function TimerAndReflectionPanel({ date, actualLogs, reflection, onMutate }) {
   const [timerTitle, setTimerTitle] = useState("");
+  const [manualLog, setManualLog] = useState({ title: "", startTime: "09:00", endTime: "10:00" });
+  const [editingLogId, setEditingLogId] = useState(null);
+  const [editingLog, setEditingLog] = useState(null);
 
   function startTimer() {
     if (!timerTitle.trim()) return;
     onMutate(api("/timer/start", { method: "POST", body: JSON.stringify({ date, title: timerTitle }) }));
     setTimerTitle("");
+  }
+
+  function addManualLog() {
+    if (!manualLog.title.trim()) return;
+    onMutate(api("/actual-logs", { method: "POST", body: JSON.stringify({ date, ...manualLog }) }));
+    setManualLog({ title: "", startTime: manualLog.endTime, endTime: manualLog.endTime });
+  }
+
+  function beginEditLog(log) {
+    setEditingLogId(log.id);
+    setEditingLog({ title: log.title, startTime: timeInputValue(log.startedAt), endTime: log.endedAt ? timeInputValue(log.endedAt) : timeInputValue(new Date()) });
+  }
+
+  function saveEditingLog(id) {
+    if (!editingLog?.title.trim()) return;
+    onMutate(api(`/actual-logs/${id}`, { method: "PATCH", body: JSON.stringify({ date, ...editingLog }) }));
+    setEditingLogId(null);
+    setEditingLog(null);
   }
 
   return (
@@ -511,23 +536,49 @@ function TimerAndReflectionPanel({ date, actualLogs, reflection, onMutate }) {
         <button onClick={startTimer}>開始</button>
       </div>
 
+      <div className="manualLogBox">
+        <p className="muted">タイマーを押し忘れた作業も、実績として手入力できます。</p>
+        <div className="inlineForm scheduleForm">
+          <input type="time" value={manualLog.startTime} onChange={(event) => setManualLog({ ...manualLog, startTime: event.target.value })} />
+          <input type="time" value={manualLog.endTime} onChange={(event) => setManualLog({ ...manualLog, endTime: event.target.value })} />
+          <input placeholder="例: 会議・移動・家事" value={manualLog.title} onChange={(event) => setManualLog({ ...manualLog, title: event.target.value })} />
+          <button onClick={addManualLog}>実績に追加</button>
+        </div>
+      </div>
+
       <div className="logs">
         {actualLogs.map((log) => (
           <div key={log.id}>
-            <strong>{log.title}</strong>
-            <span>
-              {new Date(log.startedAt).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}
-              {log.endedAt
-                ? ` - ${new Date(log.endedAt).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })} (${log.durationMinutes}分)`
-                : " 実行中"}
-            </span>
-            {!log.endedAt && (
-              <button onClick={() => onMutate(api("/timer/stop", {
-                method: "POST",
-                body: JSON.stringify({ logId: log.id }),
-              }))}>
-                停止
-              </button>
+            {editingLogId === log.id ? (
+              <>
+                <input value={editingLog.title} onChange={(event) => setEditingLog({ ...editingLog, title: event.target.value })} />
+                <span className="logEditTimes">
+                  <input type="time" value={editingLog.startTime} onChange={(event) => setEditingLog({ ...editingLog, startTime: event.target.value })} />
+                  <input type="time" value={editingLog.endTime} onChange={(event) => setEditingLog({ ...editingLog, endTime: event.target.value })} />
+                </span>
+                <span className="logActions">
+                  <button onClick={() => saveEditingLog(log.id)}>保存</button>
+                  <button className="ghost" onClick={() => { setEditingLogId(null); setEditingLog(null); }}>取消</button>
+                </span>
+              </>
+            ) : (
+              <>
+                <strong>{log.title}</strong>
+                <span>
+                  {new Date(log.startedAt).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}
+                  {log.endedAt
+                    ? ` - ${new Date(log.endedAt).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })} (${log.durationMinutes}分)`
+                    : " 実行中"}
+                </span>
+                <span className="logActions">
+                  {!log.endedAt ? (
+                    <button onClick={() => onMutate(api("/timer/stop", { method: "POST", body: JSON.stringify({ logId: log.id }) }))}>停止</button>
+                  ) : (
+                    <button className="ghost" onClick={() => beginEditLog(log)}>編集</button>
+                  )}
+                  <button className="ghost" onClick={() => onMutate(api(`/actual-logs/${log.id}`, { method: "DELETE" }))}>削除</button>
+                </span>
+              </>
             )}
           </div>
         ))}
@@ -563,6 +614,18 @@ function ReflectionForm({ reflection, onSave }) {
 }
 
 function ExportPanel({ targetExportText, actualExportText, setMessage }) {
+  const [editableActualText, setEditableActualText] = useState(actualExportText);
+  const [actualTextEdited, setActualTextEdited] = useState(false);
+
+  useEffect(() => {
+    if (!actualTextEdited) setEditableActualText(actualExportText);
+  }, [actualExportText, actualTextEdited]);
+
+  function restoreActualText() {
+    setEditableActualText(actualExportText);
+    setActualTextEdited(false);
+  }
+
   async function copyText(label, text) {
     await navigator.clipboard.writeText(text);
     setMessage(`${label}をコピーしました`);
@@ -580,8 +643,11 @@ function ExportPanel({ targetExportText, actualExportText, setMessage }) {
         </div>
         <div className="exportPane">
           <h3>📈 実際</h3>
-          <textarea value={actualExportText} readOnly aria-label="実際テキスト出力" />
-          <button onClick={() => copyText("実際", actualExportText)}>実際をコピー</button>
+          <textarea value={editableActualText} onChange={(event) => { setEditableActualText(event.target.value); setActualTextEdited(true); }} aria-label="実際テキスト出力" />
+          <div className="actions">
+            <button onClick={() => copyText("実際", editableActualText)}>実際をコピー</button>
+            <button className="ghost" onClick={restoreActualText}>自動生成に戻す</button>
+          </div>
         </div>
       </div>
     </section>
