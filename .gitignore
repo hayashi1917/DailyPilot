@@ -42,6 +42,3 @@ coverage/
 .playwright/
 playwright-report/
 test-results/
-
-# wrangler files
-wrangler.toml

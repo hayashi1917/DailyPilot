@@ -5,9 +5,8 @@ pages_build_output_dir = "dist"
 [[d1_databases]]
 binding = "DB"
 database_name = "daily-pilot"
-database_id = "replace-with-your-d1-database-id"
+database_id = "8b4fe778-8d40-4796-8da3-48e5ac2c183b"
 
-[vars]
-GOOGLE_REDIRECT_URI = "http://localhost:8788/api/google/callback"
-APP_BASE_URL = "http://localhost:8788"
-CALENDAR_AUTO_SYNC_MINUTES = "15"
+# 生成AI（AI振り返りドラフト生成）に使う Workers AI バインディング。APIキーは不要です。
+[ai]
+binding = "AI"

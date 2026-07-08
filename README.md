@@ -10,6 +10,7 @@ DailyPilot は、1日の目標タスク、予定、実績ログ、振り返り�
 - 予定時間の重複警告
 - 「いま行っている作業」を記録する開始/停止タイマー
 - タスク達成率、理由、改善点、良かった点、明日へのメモを記録する振り返りフォーム
+- 当日のタスク・予定・実績をもとに振り返りドラフトを自動生成する生成AI機能（Cloudflare Workers AI）
 - 入力した内容を、「理想の1日のスケジュール」と「実際に過ごした1日のスケジュール」に分けてテキスト出力
 - Googleカレンダー連携
   - Google OAuth による接続
@@ -148,6 +149,15 @@ wrangler pages secret put GOOGLE_CLIENT_SECRET
 [vars]
 CALENDAR_AUTO_SYNC_MINUTES = "15"
 ```
+
+## 生成AI（AI振り返りドラフト生成）について
+
+振り返りカードの「✦ AIでドラフト生成」ボタンを押すと、当日のタスク・予定・実績ログをもとに、理由・改善点・良かった点・明日へのメモのドラフトを Cloudflare Workers AI が生成します。生成結果はフォームに反映されるだけなので、内容を確認・編集してから「振り返りを保存」を押してください。
+
+- 使用モデル: 既定は `@cf/meta/llama-3.3-70b-instruct-fp8-fast`（環境変数 `AI_MODEL` で変更可能）
+- 必要な設定: `wrangler.toml` の `[ai] binding = "AI"`（本リポジトリでは設定済み）。OpenAI等の外部APIキーは不要です
+- 課金: Workers AI の無料枠（Neurons）内で利用できます。超過分は Cloudflare の従量課金です
+- ローカル開発: `wrangler pages dev` 実行時は Cloudflare アカウント経由でリモート推論するため、`wrangler login` 済みである必要があります
 
 ## Google OAuth / Googleカレンダー設定手順
 
