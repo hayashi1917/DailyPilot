@@ -380,6 +380,92 @@ async function getDaySummary(env, request, userId, date) {
   return { day, tasks: taskRows, schedule: scheduleRows, actualLogs: logRows, reflection: reflection || { achievementRate, reason: "", improvement: "", goodPoints: "", tomorrowNotes: "" }, googleSync: sync };
 }
 
+// ===== 生成AI（Cloudflare Workers AI） =====
+// wrangler.toml の [ai] binding = "AI" を通じて呼び出します。APIキーは不要です。
+const DEFAULT_AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+
+// 当日のタスク・予定・実績・振り返りをプロンプトに変換します。
+function buildReflectionPrompt(summary) {
+  const taskLines = summary.tasks.length
+    ? summary.tasks.map((task) => `- [優先度${task.priority}] ${task.title}（${{ planned: "未評価", done: "完了", partial: "一部達成", missed: "未達" }[task.status]}）`)
+    : ["（タスク未登録）"];
+  const scheduleLines = summary.schedule.length
+    ? summary.schedule.map((block) => `- ${block.startTime}〜${block.endTime} ${block.title}`)
+    : ["（予定未登録）"];
+  const logLines = summary.actualLogs.length
+    ? summary.actualLogs.map((log) => `- ${log.title}（${log.durationMinutes ? `${log.durationMinutes}分` : "計測中"}）`)
+    : ["（実績未記録）"];
+  const existing = summary.reflection;
+
+  return [
+    `対象日: ${summary.day.date}`,
+    `タスク達成率（自動計算）: ${existing.achievementRate}%`,
+    "",
+    "■ 目標タスク",
+    ...taskLines,
+    "",
+    "■ 目標スケジュール",
+    ...scheduleLines,
+    "",
+    "■ 実際の作業実績",
+    ...logLines,
+    "",
+    "■ ユーザーがすでに書いたメモ（あれば尊重して膨らませる）",
+    `理由: ${existing.reason || "未入力"}`,
+    `改善点: ${existing.improvement || "未入力"}`,
+    `良かった点: ${existing.goodPoints || "未入力"}`,
+    `明日へのメモ: ${existing.tomorrowNotes || "未入力"}`,
+  ].join("\n");
+}
+
+// AI応答からJSON部分だけを取り出します。前後に余計な文章が付いても解析できるようにします。
+function extractJsonObject(text) {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end <= start) return null;
+  try {
+    return JSON.parse(text.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+async function generateAiReflection(env, summary) {
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "あなたは日本語で答える、1日の振り返りを支援するコーチです。",
+        "ユーザーの1日の目標タスク・予定・実績をもとに、振り返りのドラフトを作成してください。",
+        "事実に基づき、具体的で簡潔に書いてください。実績が少ない場合も責めずに前向きな改善案を出してください。",
+        "必ず次のキーを持つJSONオブジェクトだけを出力してください（他の文章は一切不要）:",
+        '{"comment": "1日への短い総評（1〜2文）", "reason": "達成率の理由の分析", "improvement": "明日から実行できる具体的な改善点", "goodPoints": "良かった点", "tomorrowNotes": "明日へのメモ・申し送り"}',
+        "各値は日本語のプレーンテキストで、それぞれ200文字以内にしてください。",
+      ].join("\n"),
+    },
+    { role: "user", content: buildReflectionPrompt(summary) },
+  ];
+
+  const result = await env.AI.run(env.AI_MODEL || DEFAULT_AI_MODEL, {
+    messages,
+    max_tokens: 1024,
+    temperature: 0.4,
+  });
+
+  // モデルにより response が文字列・オブジェクトの両方で返るため、どちらにも対応します。
+  const raw = typeof result === "string" ? result : result?.response;
+  const parsed = raw && typeof raw === "object" ? raw : extractJsonObject(String(raw ?? ""));
+  if (!parsed) throw new Error("AI応答の解析に失敗しました。もう一度お試しください。");
+
+  return {
+    comment: String(parsed.comment || ""),
+    reason: String(parsed.reason || ""),
+    improvement: String(parsed.improvement || ""),
+    goodPoints: String(parsed.goodPoints || ""),
+    tomorrowNotes: String(parsed.tomorrowNotes || ""),
+  };
+}
+
 async function exchangeGoogleCode(env, request, code) {
   const config = googleConfig(env, request);
   if (!config.clientId || !config.clientSecret) throw new Error("Google OAuth client id/secret are not configured");
@@ -544,6 +630,18 @@ async function handleApi({ request, env }) {
       const day = await ensureDay(appDb, user.id, date);
       await appDb.insert(reflections).values({ dayId: day.id, userId: user.id, achievementRate: body.achievementRate, reason: body.reason, improvement: body.improvement, goodPoints: body.goodPoints, tomorrowNotes: body.tomorrowNotes }).onConflictDoUpdate({ target: [reflections.userId, reflections.dayId], set: { achievementRate: body.achievementRate, reason: body.reason, improvement: body.improvement, goodPoints: body.goodPoints, tomorrowNotes: body.tomorrowNotes, updatedAt: sql`CURRENT_TIMESTAMP` } }).run();
       return json(await getDaySummary(env, request, user.id, date));
+    }
+
+    // AI振り返りドラフト生成。当日のデータを集めてWorkers AIに渡します。
+    if (request.method === "POST" && path === "/ai/reflection") {
+      const body = await request.json();
+      if (!isValidDate(body.date)) return badRequest("Invalid date");
+      if (!env.AI) {
+        return json({ error: "AI機能が有効化されていません。wrangler.toml の [ai] binding を設定して再デプロイしてください。" }, { status: 503 });
+      }
+      const summary = await getDaySummary(env, request, user.id, body.date);
+      const reflection = await generateAiReflection(env, summary);
+      return json(reflection);
     }
 
     if (request.method === "GET" && path === "/google/config") {

@@ -6,6 +6,7 @@ import "./styles.css";
 const PRIORITIES = ["S", "A", "B"];
 const STATUS_MARKS = { planned: "", done: "◯", partial: "△", missed: "☓" };
 const STATUS_LABELS = { planned: "未評価", done: "完了", partial: "一部", missed: "未達" };
+const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
 const TODAY = new Date().toISOString().slice(0, 10);
 
 async function api(path, init = {}) {
@@ -25,6 +26,17 @@ async function api(path, init = {}) {
 function japaneseDate(value) {
   const parsed = new Date(`${value}T00:00:00+09:00`);
   return `${parsed.getMonth() + 1}月${parsed.getDate()}日`;
+}
+
+function japaneseDateWithWeekday(value) {
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return `${parsed.getUTCMonth() + 1}月${parsed.getUTCDate()}日（${WEEKDAYS[parsed.getUTCDay()]}）`;
+}
+
+function shiftDate(value, delta) {
+  const parsed = new Date(`${value}T00:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + delta);
+  return parsed.toISOString().slice(0, 10);
 }
 
 function minutes(value) {
@@ -126,9 +138,12 @@ function AuthScreen({ onAuthenticated }) {
   const [mode, setMode] = useState("login");
   const [form, setForm] = useState({ email: "", password: "", name: "" });
   const [message, setMessage] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   async function submit(event) {
     event.preventDefault();
+    setSubmitting(true);
+    setMessage("");
 
     try {
       const endpoint = mode === "login" ? "/auth/login" : "/auth/register";
@@ -136,15 +151,37 @@ function AuthScreen({ onAuthenticated }) {
       onAuthenticated(result.user);
     } catch (error) {
       setMessage(error.message);
+    } finally {
+      setSubmitting(false);
     }
   }
 
   return (
     <main className="authShell">
       <section className="authCard">
-        <p className="eyebrow">DailyPilot</p>
-        <h1>{mode === "login" ? "ログイン" : "アカウント作成"}</h1>
-        <p>複数ユーザーで運用できるよう、ユーザーごとにタスク、予定、Googleカレンダー連携を分離して保存します。</p>
+        <div className="authBrand">
+          <span className="brandMark">DP</span>
+          <span className="brandName">DailyPilot</span>
+        </div>
+        <h1>一日の設計と振り返りを、ひとつの画面で。</h1>
+        <p className="authLead">目標タスク・スケジュール・実績・振り返りをまとめて管理し、Googleカレンダーとも同期できます。</p>
+
+        <div className="authTabs" role="tablist">
+          <button
+            type="button"
+            className={mode === "login" ? "active" : ""}
+            onClick={() => setMode("login")}
+          >
+            ログイン
+          </button>
+          <button
+            type="button"
+            className={mode === "register" ? "active" : ""}
+            onClick={() => setMode("register")}
+          >
+            アカウント作成
+          </button>
+        </div>
 
         <form onSubmit={submit} className="stack">
           {mode === "register" && (
@@ -169,22 +206,44 @@ function AuthScreen({ onAuthenticated }) {
             required
             minLength={8}
           />
-          <button>{mode === "login" ? "ログイン" : "作成して開始"}</button>
+          <button className="primary" disabled={submitting}>
+            {submitting ? "送信中..." : mode === "login" ? "ログイン" : "作成して開始"}
+          </button>
         </form>
 
-        {message && <p className="warning">{message}</p>}
-        <button className="linkButton" onClick={() => setMode(mode === "login" ? "register" : "login")}>
-          {mode === "login" ? "アカウントを作成する" : "ログインに戻る"}
-        </button>
+        {message && <p className="formError">{message}</p>}
       </section>
     </main>
+  );
+}
+
+// タスクの達成状況を ◯ / △ / ☓ のチップで切り替えます。同じチップをもう一度押すと未評価に戻ります。
+function TaskStatusChips({ task, onMutate }) {
+  return (
+    <div className="statusChips">
+      {["done", "partial", "missed"].map((status) => (
+        <button
+          key={status}
+          type="button"
+          title={STATUS_LABELS[status]}
+          className={`statusChip ${status} ${task.status === status ? "active" : ""}`}
+          onClick={() => onMutate(api(`/tasks/${task.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ status: task.status === status ? "planned" : status }),
+          }))}
+        >
+          {STATUS_MARKS[status]}
+        </button>
+      ))}
+    </div>
   );
 }
 
 function TaskPanel({ date, tasks, onMutate }) {
   const [draft, setDraft] = useState({ title: "", priority: "A" });
 
-  function addTask() {
+  function addTask(event) {
+    event.preventDefault();
     if (!draft.title.trim()) return;
     onMutate(
       api("/tasks", { method: "POST", body: JSON.stringify({ date, ...draft }) }),
@@ -194,50 +253,52 @@ function TaskPanel({ date, tasks, onMutate }) {
 
   return (
     <article className="card">
-      <h2>✅ タスク管理</h2>
-      <div className="inlineForm">
+      <header className="cardHead">
+        <h2>タスク</h2>
+        <span className="cardHint">S / A / B 優先度</span>
+      </header>
+
+      <form className="inlineForm" onSubmit={addTask}>
         <select value={draft.priority} onChange={(event) => setDraft({ ...draft, priority: event.target.value })}>
           {PRIORITIES.map((priority) => <option key={priority}>{priority}</option>)}
         </select>
         <input
-          placeholder="例: デロイトWebテスト"
+          placeholder="タスクを追加"
           value={draft.title}
           onChange={(event) => setDraft({ ...draft, title: event.target.value })}
         />
-        <button onClick={addTask}>追加</button>
-      </div>
+        <button className="primary">追加</button>
+      </form>
 
       {PRIORITIES.map((priority) => {
         const priorityTasks = tasks.filter((task) => task.priority === priority);
         return (
-          <div className="priority" key={priority}>
-            <strong>{priority}</strong>
-            <div className="taskList">
-              {priorityTasks.length === 0 && <p className="muted">未登録</p>}
-              {priorityTasks.map((task) => (
-                <div className="task" key={task.id}>
-                  <input
-                    value={task.title}
-                    onChange={(event) => onMutate(api(`/tasks/${task.id}`, {
-                      method: "PATCH",
-                      body: JSON.stringify({ title: event.target.value }),
-                    }))}
-                  />
-                  <select
-                    value={task.status}
-                    onChange={(event) => onMutate(api(`/tasks/${task.id}`, {
-                      method: "PATCH",
-                      body: JSON.stringify({ status: event.target.value }),
-                    }))}
-                  >
-                    {Object.entries(STATUS_LABELS).map(([value, label]) => (
-                      <option value={value} key={value}>{label}</option>
-                    ))}
-                  </select>
-                  <button className="ghost" onClick={() => onMutate(api(`/tasks/${task.id}`, { method: "DELETE" }))}>削除</button>
-                </div>
-              ))}
+          <div className="prioritySection" key={priority}>
+            <div className="priorityHead">
+              <span className={`priorityBadge p${priority}`}>{priority}</span>
+              <span className="priorityCount">{priorityTasks.length}件</span>
             </div>
+            {priorityTasks.length === 0 && <p className="empty">未登録</p>}
+            {priorityTasks.map((task) => (
+              <div className={`taskRow ${task.status}`} key={task.id}>
+                <input
+                  className="taskTitle"
+                  value={task.title}
+                  onChange={(event) => onMutate(api(`/tasks/${task.id}`, {
+                    method: "PATCH",
+                    body: JSON.stringify({ title: event.target.value }),
+                  }))}
+                />
+                <TaskStatusChips task={task} onMutate={onMutate} />
+                <button
+                  className="iconBtn danger"
+                  title="削除"
+                  onClick={() => onMutate(api(`/tasks/${task.id}`, { method: "DELETE" }))}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
           </div>
         );
       })}
@@ -275,29 +336,33 @@ function GoogleCalendarPanel({ date, googleSync, setMessage, onMutate }) {
 
   return (
     <article className="card">
-      <h2>📅 Googleカレンダー</h2>
-      <p className="muted">Google連携後は、対象日を開くたびに一定間隔で自動同期します。今すぐ反映したい場合は「今すぐ同期」を押してください。</p>
-      {googleConfig?.redirectUri && (
-        <div className="oauthHint">
-          <strong>redirect_uri_mismatch が出る場合</strong>
-          <p>Google Cloud Console の「承認済みのリダイレクト URI」に、以下を完全一致で登録してください。</p>
-          <code>{googleConfig.redirectUri}</code>
-          {googleConfig.ignoredConfiguredRedirectUri && (
-            <p className="warning compact">古い GOOGLE_REDIRECT_URI（{googleConfig.ignoredConfiguredRedirectUri}）は現在のアクセス元と違うため無視しています。</p>
-          )}
-          <button className="ghost" onClick={copyRedirectUri}>URIをコピー</button>
-        </div>
-      )}
+      <header className="cardHead">
+        <h2>Googleカレンダー</h2>
+        <span className={`syncDot ${googleSync?.connected ? "on" : "off"}`}>
+          {googleSync?.connected ? "接続済み" : "未接続"}
+        </span>
+      </header>
+      <p className="muted">対象日を開くたびに一定間隔で自動同期します。今すぐ反映したい場合は「今すぐ同期」を押してください。</p>
       <div className="actions">
-        <button onClick={connectGoogle}>Google連携</button>
-        <button onClick={() => onMutate(
+        <button className="primary" onClick={connectGoogle}>Google連携</button>
+        <button className="ghost" onClick={() => onMutate(
           api("/google/sync", { method: "POST", body: JSON.stringify({ date, force: true }) }),
           "Googleカレンダーを同期しました",
         )}>
           今すぐ同期
         </button>
       </div>
-      <p className="muted">同期状態: {googleSync?.connected ? "接続済み" : "未接続"}</p>
+      {googleConfig?.redirectUri && (
+        <details className="oauthHint">
+          <summary>redirect_uri_mismatch が出る場合</summary>
+          <p>Google Cloud Console の「承認済みのリダイレクト URI」に、以下を完全一致で登録してください。</p>
+          <code>{googleConfig.redirectUri}</code>
+          {googleConfig.ignoredConfiguredRedirectUri && (
+            <p className="formError">古い GOOGLE_REDIRECT_URI（{googleConfig.ignoredConfiguredRedirectUri}）は現在のアクセス元と違うため無視しています。</p>
+          )}
+          <button className="ghost small" onClick={copyRedirectUri}>URIをコピー</button>
+        </details>
+      )}
     </article>
   );
 }
@@ -305,44 +370,62 @@ function GoogleCalendarPanel({ date, googleSync, setMessage, onMutate }) {
 function SchedulePanel({ date, schedule, overlaps, onMutate }) {
   const [draft, setDraft] = useState({ title: "", startTime: "09:00", endTime: "10:00" });
 
-  function addSchedule() {
+  function addSchedule(event) {
+    event.preventDefault();
     if (!draft.title.trim()) return;
     onMutate(api("/schedule", { method: "POST", body: JSON.stringify({ date, ...draft }) }));
     setDraft({ title: "", startTime: draft.endTime, endTime: draft.endTime });
   }
 
   return (
-    <article className="card scheduleCard">
-      <h2>🗓️ 1日のスケジュール</h2>
-      <div className="inlineForm scheduleForm">
-        <input type="time" value={draft.startTime} onChange={(event) => setDraft({ ...draft, startTime: event.target.value })} />
-        <input type="time" value={draft.endTime} onChange={(event) => setDraft({ ...draft, endTime: event.target.value })} />
-        <input placeholder="例: 長期インターン①" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
-        <button onClick={addSchedule}>追加</button>
-      </div>
+    <article className="card">
+      <header className="cardHead">
+        <h2>スケジュール</h2>
+        <span className="cardHint">{schedule.length}件の予定</span>
+      </header>
 
-      {overlaps && <p className="warning">時間が重複している予定があります。</p>}
+      <form className="inlineForm scheduleForm" onSubmit={addSchedule}>
+        <input type="time" value={draft.startTime} onChange={(event) => setDraft({ ...draft, startTime: event.target.value })} />
+        <span className="timeSep">→</span>
+        <input type="time" value={draft.endTime} onChange={(event) => setDraft({ ...draft, endTime: event.target.value })} />
+        <input className="grow" placeholder="予定を追加" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
+        <button className="primary">追加</button>
+      </form>
+
+      {overlaps && <p className="inlineWarning">時間が重複している予定があります。</p>}
+
       <div className="timeline">
+        {schedule.length === 0 && <p className="empty">予定はまだありません</p>}
         {schedule.map((block) => (
           <div
-            className={`block ${block.source}`}
+            className={`timelineRow ${block.source === "google_calendar" ? "google" : "manual"}`}
             key={block.id}
-            style={{ minHeight: Math.max(46, (minutes(block.endTime) - minutes(block.startTime)) / 2) }}
           >
-            <span>{block.startTime} - {block.endTime}</span>
-            <strong>{block.title}</strong>
-            <em>{block.source === "google_calendar" ? "Google" : "Manual"}</em>
-            <div>
-              <button
-                disabled={Boolean(block.externalEventId)}
-                onClick={() => onMutate(api("/google/events", {
-                  method: "POST",
-                  body: JSON.stringify({ scheduleBlockId: block.id, date, title: block.title, startTime: block.startTime, endTime: block.endTime }),
-                }), "Googleカレンダーへ追加しました")}
-              >
-                {block.externalEventId ? "Google連携済み" : "Googleへ追加"}
-              </button>
-              <button className="ghost" onClick={() => onMutate(api(`/schedule/${block.id}`, { method: "DELETE" }))}>削除</button>
+            <div className="timelineTime">
+              <span>{block.startTime}</span>
+              <span className="timelineTimeEnd">{block.endTime}</span>
+            </div>
+            <div
+              className="timelineBody"
+              style={{ minHeight: Math.max(56, (minutes(block.endTime) - minutes(block.startTime)) / 2) }}
+            >
+              <div className="timelineText">
+                <strong>{block.title}</strong>
+                <span className="sourceTag">{block.source === "google_calendar" ? "Google" : "手動"}</span>
+              </div>
+              <div className="rowActions">
+                <button
+                  className="ghost small"
+                  disabled={Boolean(block.externalEventId)}
+                  onClick={() => onMutate(api("/google/events", {
+                    method: "POST",
+                    body: JSON.stringify({ scheduleBlockId: block.id, date, title: block.title, startTime: block.startTime, endTime: block.endTime }),
+                  }), "Googleカレンダーへ追加しました")}
+                >
+                  {block.externalEventId ? "連携済み" : "Googleへ追加"}
+                </button>
+                <button className="iconBtn danger" title="削除" onClick={() => onMutate(api(`/schedule/${block.id}`, { method: "DELETE" }))}>×</button>
+              </div>
             </div>
           </div>
         ))}
@@ -355,19 +438,23 @@ function timeInputValue(value) {
   return new Date(value).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Tokyo" });
 }
 
-function TimerAndReflectionPanel({ date, actualLogs, reflection, onMutate }) {
+function TimerPanel({ date, actualLogs, currentTime, onMutate }) {
   const [timerTitle, setTimerTitle] = useState("");
   const [manualLog, setManualLog] = useState({ title: "", startTime: "09:00", endTime: "10:00" });
   const [editingLogId, setEditingLogId] = useState(null);
   const [editingLog, setEditingLog] = useState(null);
 
-  function startTimer() {
+  const runningLog = actualLogs.find((log) => !log.endedAt);
+
+  function startTimer(event) {
+    event.preventDefault();
     if (!timerTitle.trim()) return;
     onMutate(api("/timer/start", { method: "POST", body: JSON.stringify({ date, title: timerTitle }) }));
     setTimerTitle("");
   }
 
-  function addManualLog() {
+  function addManualLog(event) {
+    event.preventDefault();
     if (!manualLog.title.trim()) return;
     onMutate(api("/actual-logs", { method: "POST", body: JSON.stringify({ date, ...manualLog }) }));
     setManualLog({ title: "", startTime: manualLog.endTime, endTime: manualLog.endTime });
@@ -385,88 +472,153 @@ function TimerAndReflectionPanel({ date, actualLogs, reflection, onMutate }) {
     setEditingLog(null);
   }
 
+  function elapsedMinutes(log) {
+    return Math.max(1, Math.round((currentTime.getTime() - new Date(log.startedAt).getTime()) / 60000));
+  }
+
   return (
     <article className="card">
-      <h2>▶️ 実績タイマー</h2>
-      <div className="inlineForm">
-        <input placeholder="いま行うこと" value={timerTitle} onChange={(event) => setTimerTitle(event.target.value)} />
-        <button onClick={startTimer}>開始</button>
-      </div>
+      <header className="cardHead">
+        <h2>実績タイマー</h2>
+        {runningLog && <span className="runningPill">計測中</span>}
+      </header>
 
-      <div className="manualLogBox">
-        <p className="muted">タイマーを押し忘れた作業も、実績として手入力できます。</p>
-        <div className="inlineForm scheduleForm">
-          <input type="time" value={manualLog.startTime} onChange={(event) => setManualLog({ ...manualLog, startTime: event.target.value })} />
-          <input type="time" value={manualLog.endTime} onChange={(event) => setManualLog({ ...manualLog, endTime: event.target.value })} />
-          <input placeholder="例: 会議・移動・家事" value={manualLog.title} onChange={(event) => setManualLog({ ...manualLog, title: event.target.value })} />
-          <button onClick={addManualLog}>実績に追加</button>
-        </div>
-      </div>
+      <form className="inlineForm" onSubmit={startTimer}>
+        <input placeholder="いま行うこと" value={timerTitle} onChange={(event) => setTimerTitle(event.target.value)} />
+        <button className="primary">開始</button>
+      </form>
 
       <div className="logs">
+        {actualLogs.length === 0 && <p className="empty">実績はまだありません</p>}
         {actualLogs.map((log) => (
-          <div key={log.id}>
+          <div className={`logRow ${!log.endedAt ? "running" : ""}`} key={log.id}>
             {editingLogId === log.id ? (
-              <>
+              <div className="logEdit">
                 <input value={editingLog.title} onChange={(event) => setEditingLog({ ...editingLog, title: event.target.value })} />
-                <span className="logEditTimes">
+                <div className="logEditTimes">
                   <input type="time" value={editingLog.startTime} onChange={(event) => setEditingLog({ ...editingLog, startTime: event.target.value })} />
+                  <span className="timeSep">→</span>
                   <input type="time" value={editingLog.endTime} onChange={(event) => setEditingLog({ ...editingLog, endTime: event.target.value })} />
-                </span>
-                <span className="logActions">
-                  <button onClick={() => saveEditingLog(log.id)}>保存</button>
-                  <button className="ghost" onClick={() => { setEditingLogId(null); setEditingLog(null); }}>取消</button>
-                </span>
-              </>
+                  <div className="rowActions">
+                    <button className="primary small" onClick={() => saveEditingLog(log.id)}>保存</button>
+                    <button className="ghost small" onClick={() => { setEditingLogId(null); setEditingLog(null); }}>取消</button>
+                  </div>
+                </div>
+              </div>
             ) : (
               <>
-                <strong>{log.title}</strong>
-                <span>
-                  {new Date(log.startedAt).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}
-                  {log.endedAt
-                    ? ` - ${new Date(log.endedAt).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })} (${log.durationMinutes}分)`
-                    : " 実行中"}
-                </span>
-                <span className="logActions">
+                <div className="logText">
+                  <strong>{log.title}</strong>
+                  <span>
+                    {formatLogTime(log.startedAt)}
+                    {log.endedAt
+                      ? ` - ${formatLogTime(log.endedAt)}・${log.durationMinutes}分`
+                      : `から計測中・${elapsedMinutes(log)}分経過`}
+                  </span>
+                </div>
+                <div className="rowActions">
                   {!log.endedAt ? (
-                    <button onClick={() => onMutate(api("/timer/stop", { method: "POST", body: JSON.stringify({ logId: log.id }) }))}>停止</button>
+                    <button className="primary small" onClick={() => onMutate(api("/timer/stop", { method: "POST", body: JSON.stringify({ logId: log.id }) }))}>停止</button>
                   ) : (
-                    <button className="ghost" onClick={() => beginEditLog(log)}>編集</button>
+                    <button className="ghost small" onClick={() => beginEditLog(log)}>編集</button>
                   )}
-                  <button className="ghost" onClick={() => onMutate(api(`/actual-logs/${log.id}`, { method: "DELETE" }))}>削除</button>
-                </span>
+                  <button className="iconBtn danger" title="削除" onClick={() => onMutate(api(`/actual-logs/${log.id}`, { method: "DELETE" }))}>×</button>
+                </div>
               </>
             )}
           </div>
         ))}
       </div>
 
-      <ReflectionForm
-        reflection={reflection}
-        onSave={(nextReflection) => onMutate(api(`/reflections/${date}`, {
-          method: "PUT",
-          body: JSON.stringify(nextReflection),
-        }), "振り返りを保存しました")}
-      />
+      <details className="manualLogBox">
+        <summary>実績を手入力する</summary>
+        <p className="muted">タイマーを押し忘れた作業も、実績として後から追加できます。</p>
+        <form className="inlineForm scheduleForm" onSubmit={addManualLog}>
+          <input type="time" value={manualLog.startTime} onChange={(event) => setManualLog({ ...manualLog, startTime: event.target.value })} />
+          <span className="timeSep">→</span>
+          <input type="time" value={manualLog.endTime} onChange={(event) => setManualLog({ ...manualLog, endTime: event.target.value })} />
+          <input className="grow" placeholder="例: 会議・移動・家事" value={manualLog.title} onChange={(event) => setManualLog({ ...manualLog, title: event.target.value })} />
+          <button className="primary">追加</button>
+        </form>
+      </details>
     </article>
   );
 }
 
-function ReflectionForm({ reflection, onSave }) {
+function ReflectionPanel({ date, reflection, setMessage, onMutate }) {
   const [draft, setDraft] = useState(reflection);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiComment, setAiComment] = useState("");
 
   useEffect(() => setDraft(reflection), [reflection]);
 
+  // 当日のタスク・予定・実績をもとに、AIが振り返りのドラフトを生成します。
+  async function generateWithAi() {
+    setAiLoading(true);
+    try {
+      const data = await api("/ai/reflection", { method: "POST", body: JSON.stringify({ date }) });
+      setDraft((current) => ({
+        ...current,
+        reason: data.reason || current.reason,
+        improvement: data.improvement || current.improvement,
+        goodPoints: data.goodPoints || current.goodPoints,
+        tomorrowNotes: data.tomorrowNotes || current.tomorrowNotes,
+      }));
+      setAiComment(data.comment || "");
+      setMessage("AIが振り返りドラフトを生成しました。内容を確認して保存してください。");
+    } catch (error) {
+      setMessage(`AI生成に失敗しました: ${error.message}`);
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
   return (
-    <div className="reflection">
-      <h2>振り返り</h2>
-      <label>タスク達成率<input type="number" min="0" max="100" value={draft.achievementRate} onChange={(event) => setDraft({ ...draft, achievementRate: Number(event.target.value) })} /></label>
-      <label>理由<textarea value={draft.reason} onChange={(event) => setDraft({ ...draft, reason: event.target.value })} /></label>
-      <label>改善点<textarea value={draft.improvement} onChange={(event) => setDraft({ ...draft, improvement: event.target.value })} /></label>
-      <label>良かった点<textarea value={draft.goodPoints} onChange={(event) => setDraft({ ...draft, goodPoints: event.target.value })} /></label>
-      <label>明日へのメモ<textarea value={draft.tomorrowNotes} onChange={(event) => setDraft({ ...draft, tomorrowNotes: event.target.value })} /></label>
-      <button onClick={() => onSave(draft)}>振り返りを保存</button>
-    </div>
+    <article className="card">
+      <header className="cardHead">
+        <h2>振り返り</h2>
+        <button className="aiButton" onClick={generateWithAi} disabled={aiLoading}>
+          {aiLoading ? "生成中..." : "✦ AIでドラフト生成"}
+        </button>
+      </header>
+
+      {aiComment && (
+        <div className="aiComment">
+          <span className="aiCommentLabel">AIからのコメント</span>
+          <p>{aiComment}</p>
+        </div>
+      )}
+
+      <div className="reflection">
+        <label className="rateLabel">
+          <span>タスク達成率 <strong>{draft.achievementRate}%</strong></span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={draft.achievementRate}
+            onChange={(event) => setDraft({ ...draft, achievementRate: Number(event.target.value) })}
+          />
+        </label>
+        <div className="reflectionGrid">
+          <label>理由<textarea value={draft.reason} onChange={(event) => setDraft({ ...draft, reason: event.target.value })} /></label>
+          <label>改善点<textarea value={draft.improvement} onChange={(event) => setDraft({ ...draft, improvement: event.target.value })} /></label>
+          <label>良かった点<textarea value={draft.goodPoints} onChange={(event) => setDraft({ ...draft, goodPoints: event.target.value })} /></label>
+          <label>明日へのメモ<textarea value={draft.tomorrowNotes} onChange={(event) => setDraft({ ...draft, tomorrowNotes: event.target.value })} /></label>
+        </div>
+        <div className="actions">
+          <button
+            className="primary"
+            onClick={() => onMutate(api(`/reflections/${date}`, {
+              method: "PUT",
+              body: JSON.stringify(draft),
+            }), "振り返りを保存しました")}
+          >
+            振り返りを保存
+          </button>
+        </div>
+      </div>
+    </article>
   );
 }
 
@@ -489,25 +641,27 @@ function ExportPanel({ targetExportText, actualExportText, setMessage }) {
   }
 
   return (
-    <section className="card exportCard">
-      <h2>📋 テキスト出力</h2>
-      <p className="muted">目標（予定）と実際（タスク完了状況・リアルタイム計測・振り返り）を別々に出力します。</p>
+    <article className="card">
+      <header className="cardHead">
+        <h2>テキスト出力</h2>
+        <span className="cardHint">目標と実際を別々にコピーできます</span>
+      </header>
       <div className="exportSplit">
         <div className="exportPane">
-          <h3>🎯 目標</h3>
+          <h3>目標</h3>
           <textarea value={targetExportText} readOnly aria-label="目標テキスト出力" />
-          <button onClick={() => copyText("目標", targetExportText)}>目標をコピー</button>
+          <button className="ghost" onClick={() => copyText("目標", targetExportText)}>目標をコピー</button>
         </div>
         <div className="exportPane">
-          <h3>📈 実際</h3>
+          <h3>実際</h3>
           <textarea value={editableActualText} onChange={(event) => { setEditableActualText(event.target.value); setActualTextEdited(true); }} aria-label="実際テキスト出力" />
           <div className="actions">
-            <button onClick={() => copyText("実際", editableActualText)}>実際をコピー</button>
-            <button className="ghost" onClick={restoreActualText}>自動生成に戻す</button>
+            <button className="ghost" onClick={() => copyText("実際", editableActualText)}>実際をコピー</button>
+            <button className="linkButton" onClick={restoreActualText}>自動生成に戻す</button>
           </div>
         </div>
       </div>
-    </section>
+    </article>
   );
 }
 
@@ -536,6 +690,13 @@ function App() {
     const timerId = window.setInterval(() => setCurrentTime(new Date()), 30000);
     return () => window.clearInterval(timerId);
   }, []);
+
+  // 通知トーストは数秒後に自動で閉じます。
+  useEffect(() => {
+    if (!message) return;
+    const timerId = window.setTimeout(() => setMessage(""), 4500);
+    return () => window.clearTimeout(timerId);
+  }, [message]);
 
   async function loadSummary() {
     const data = await api(`/days/${date}`);
@@ -570,34 +731,72 @@ function App() {
   if (!user) return <AuthScreen onAuthenticated={setUser} />;
   if (!summary) return <main className="loading">DailyPilotを準備中...</main>;
 
+  const doneCount = summary.tasks.filter((task) => task.status === "done").length;
+  const loggedMinutes = summary.actualLogs.reduce((sum, log) => sum + (log.durationMinutes || 0), 0);
+
   return (
-    <main>
-      <header className="hero">
-        <div>
-          <p className="eyebrow">DailyPilot</p>
-          <h1>一日の設計と振り返りを、静かに整える</h1>
-          <p>ログイン中: {user.email} / 目標、実績、Googleカレンダーを一つの流れで確認できます。</p>
+    <div className="appShell">
+      <header className="topbar">
+        <div className="brand">
+          <span className="brandMark">DP</span>
+          <span className="brandName">DailyPilot</span>
         </div>
-        <div className="headerActions">
-          <label>対象日<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
-          <button className="secondary" onClick={logout}>ログアウト</button>
+
+        <div className="dateNav">
+          <button className="iconBtn" title="前日" onClick={() => setDate(shiftDate(date, -1))}>‹</button>
+          <input type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+          <button className="iconBtn" title="翌日" onClick={() => setDate(shiftDate(date, 1))}>›</button>
+          {date !== TODAY && <button className="ghost small" onClick={() => setDate(TODAY)}>今日へ</button>}
+        </div>
+
+        <div className="topbarRight">
+          <span className="userEmail">{user.email}</span>
+          <button className="ghost small" onClick={logout}>ログアウト</button>
         </div>
       </header>
 
+      <main className="page">
+        <div className="pageHead">
+          <h1>{japaneseDateWithWeekday(date)}</h1>
+          <div className="stats">
+            <div className="stat">
+              <span className="statValue">{doneCount} / {summary.tasks.length}</span>
+              <span className="statLabel">タスク完了</span>
+            </div>
+            <div className="stat">
+              <span className="statValue">{summary.schedule.length}</span>
+              <span className="statLabel">予定</span>
+            </div>
+            <div className="stat">
+              <span className="statValue">{Math.floor(loggedMinutes / 60)}h {loggedMinutes % 60}m</span>
+              <span className="statLabel">実績時間</span>
+            </div>
+            <div className="stat">
+              <span className="statValue">{summary.reflection.achievementRate}%</span>
+              <span className="statLabel">達成率</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="dashboard">
+          <div className="col colLeft">
+            <TaskPanel date={date} tasks={summary.tasks} onMutate={mutate} />
+            <GoogleCalendarPanel date={date} googleSync={summary.googleSync} setMessage={setMessage} onMutate={mutate} />
+          </div>
+          <div className="col colCenter">
+            <SchedulePanel date={date} schedule={summary.schedule} overlaps={overlaps} onMutate={mutate} />
+          </div>
+          <div className="col colRight">
+            <TimerPanel date={date} actualLogs={summary.actualLogs} currentTime={currentTime} onMutate={mutate} />
+          </div>
+        </div>
+
+        <ReflectionPanel date={date} reflection={summary.reflection} setMessage={setMessage} onMutate={mutate} />
+        <ExportPanel targetExportText={targetExportText} actualExportText={actualExportText} setMessage={setMessage} />
+      </main>
+
       {message && <div className="toast">{message}</div>}
-
-      <section className="grid two">
-        <TaskPanel date={date} tasks={summary.tasks} onMutate={mutate} />
-        <GoogleCalendarPanel date={date} googleSync={summary.googleSync} setMessage={setMessage} onMutate={mutate} />
-      </section>
-
-      <section className="grid two">
-        <SchedulePanel date={date} schedule={summary.schedule} overlaps={overlaps} onMutate={mutate} />
-        <TimerAndReflectionPanel date={date} actualLogs={summary.actualLogs} reflection={summary.reflection} onMutate={mutate} />
-      </section>
-
-      <ExportPanel targetExportText={targetExportText} actualExportText={actualExportText} setMessage={setMessage} />
-    </main>
+    </div>
   );
 }
 
