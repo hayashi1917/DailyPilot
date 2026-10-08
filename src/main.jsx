@@ -7,7 +7,8 @@ const PRIORITIES = ["S", "A", "B"];
 const STATUS_MARKS = { planned: "", done: "◯", partial: "△", missed: "☓" };
 const STATUS_LABELS = { planned: "未評価", done: "完了", partial: "一部", missed: "未達" };
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
-const TODAY = new Date().toISOString().slice(0, 10);
+// toISOString() は UTC になり、日本時間の0〜9時に前日扱いになるため、ローカル日付で求めます。
+const TODAY = new Date().toLocaleDateString("sv-SE");
 
 async function api(path, init = {}) {
   const response = await fetch(`/api${path}`, {
@@ -239,6 +240,55 @@ function TaskStatusChips({ task, onMutate }) {
   );
 }
 
+// テキストエリアの高さを内容に合わせて伸縮させます。
+function autosize(element) {
+  if (!element) return;
+  element.style.height = "auto";
+  element.style.height = `${element.scrollHeight}px`;
+}
+
+// タスク名は長くても全文が見えるよう折り返して表示し、フォーカスを外したとき（またはEnter）に保存します。
+function TaskTitle({ task, onMutate }) {
+  const [value, setValue] = useState(task.title);
+  const ref = React.useRef(null);
+
+  useEffect(() => setValue(task.title), [task.title]);
+  useEffect(() => autosize(ref.current), [value]);
+  useEffect(() => {
+    const handleResize = () => autosize(ref.current);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  function commit() {
+    const title = value.trim();
+    if (!title) {
+      setValue(task.title);
+      return;
+    }
+    if (title !== task.title) {
+      onMutate(api(`/tasks/${task.id}`, { method: "PATCH", body: JSON.stringify({ title }) }));
+    }
+  }
+
+  return (
+    <textarea
+      ref={ref}
+      rows={1}
+      className="taskTitle"
+      value={value}
+      onChange={(event) => setValue(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+          event.preventDefault();
+          event.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
+
 function TaskPanel({ date, tasks, onMutate }) {
   const [draft, setDraft] = useState({ title: "", priority: "A" });
 
@@ -281,14 +331,7 @@ function TaskPanel({ date, tasks, onMutate }) {
             {priorityTasks.length === 0 && <p className="empty">未登録</p>}
             {priorityTasks.map((task) => (
               <div className={`taskRow ${task.status}`} key={task.id}>
-                <input
-                  className="taskTitle"
-                  value={task.title}
-                  onChange={(event) => onMutate(api(`/tasks/${task.id}`, {
-                    method: "PATCH",
-                    body: JSON.stringify({ title: event.target.value }),
-                  }))}
-                />
+                <TaskTitle task={task} onMutate={onMutate} />
                 <TaskStatusChips task={task} onMutate={onMutate} />
                 <button
                   className="iconBtn danger"
@@ -306,7 +349,8 @@ function TaskPanel({ date, tasks, onMutate }) {
   );
 }
 
-function GoogleCalendarPanel({ date, googleSync, setMessage, onMutate }) {
+// Googleカレンダーの接続状態・同期ボタンを、スケジュールカード内にコンパクトに表示します。
+function GoogleSyncBar({ date, googleSync, setMessage, onMutate }) {
   const [googleConfig, setGoogleConfig] = useState(null);
 
   useEffect(() => {
@@ -335,24 +379,29 @@ function GoogleCalendarPanel({ date, googleSync, setMessage, onMutate }) {
   }
 
   return (
-    <article className="card">
-      <header className="cardHead">
-        <h2>Googleカレンダー</h2>
+    <div className="googleBar">
+      <div className="googleBarMain">
         <span className={`syncDot ${googleSync?.connected ? "on" : "off"}`}>
-          {googleSync?.connected ? "接続済み" : "未接続"}
+          Googleカレンダー{googleSync?.connected ? "と同期中" : "未接続"}
         </span>
-      </header>
-      <p className="muted">対象日を開くたびに一定間隔で自動同期します。今すぐ反映したい場合は「今すぐ同期」を押してください。</p>
-      <div className="actions">
-        <button className="primary" onClick={connectGoogle}>Google連携</button>
-        <button className="ghost" onClick={() => onMutate(
-          api("/google/sync", { method: "POST", body: JSON.stringify({ date, force: true }) }),
-          "Googleカレンダーを同期しました",
-        )}>
-          今すぐ同期
-        </button>
+        <div className="actions">
+          {googleSync?.connected ? (
+            <button
+              className="ghost small"
+              title="対象日を開くたびに一定間隔で自動同期します。今すぐ反映したい場合に押してください。"
+              onClick={() => onMutate(
+                api("/google/sync", { method: "POST", body: JSON.stringify({ date, force: true }) }),
+                "Googleカレンダーを同期しました",
+              )}
+            >
+              今すぐ同期
+            </button>
+          ) : (
+            <button className="ghost small" onClick={connectGoogle}>Google連携</button>
+          )}
+        </div>
       </div>
-      {googleConfig?.redirectUri && (
+      {googleConfig?.redirectUri && !googleSync?.connected && (
         <details className="oauthHint">
           <summary>redirect_uri_mismatch が出る場合</summary>
           <p>Google Cloud Console の「承認済みのリダイレクト URI」に、以下を完全一致で登録してください。</p>
@@ -363,11 +412,11 @@ function GoogleCalendarPanel({ date, googleSync, setMessage, onMutate }) {
           <button className="ghost small" onClick={copyRedirectUri}>URIをコピー</button>
         </details>
       )}
-    </article>
+    </div>
   );
 }
 
-function SchedulePanel({ date, schedule, overlaps, onMutate }) {
+function SchedulePanel({ date, schedule, overlaps, googleSync, setMessage, onMutate }) {
   const [draft, setDraft] = useState({ title: "", startTime: "09:00", endTime: "10:00" });
 
   function addSchedule(event) {
@@ -392,6 +441,8 @@ function SchedulePanel({ date, schedule, overlaps, onMutate }) {
         <button className="primary">追加</button>
       </form>
 
+      <GoogleSyncBar date={date} googleSync={googleSync} setMessage={setMessage} onMutate={onMutate} />
+
       {overlaps && <p className="inlineWarning">時間が重複している予定があります。</p>}
 
       <div className="timeline">
@@ -409,22 +460,25 @@ function SchedulePanel({ date, schedule, overlaps, onMutate }) {
               className="timelineBody"
               style={{ minHeight: Math.max(56, (minutes(block.endTime) - minutes(block.startTime)) / 2) }}
             >
-              <div className="timelineText">
-                <strong>{block.title}</strong>
+              <strong className="timelineTitle">{block.title}</strong>
+              <div className="timelineMeta">
                 <span className="sourceTag">{block.source === "google_calendar" ? "Google" : "手動"}</span>
-              </div>
-              <div className="rowActions">
-                <button
-                  className="ghost small"
-                  disabled={Boolean(block.externalEventId)}
-                  onClick={() => onMutate(api("/google/events", {
-                    method: "POST",
-                    body: JSON.stringify({ scheduleBlockId: block.id, date, title: block.title, startTime: block.startTime, endTime: block.endTime }),
-                  }), "Googleカレンダーへ追加しました")}
-                >
-                  {block.externalEventId ? "連携済み" : "Googleへ追加"}
-                </button>
-                <button className="iconBtn danger" title="削除" onClick={() => onMutate(api(`/schedule/${block.id}`, { method: "DELETE" }))}>×</button>
+                <div className="rowActions">
+                  {block.externalEventId ? (
+                    <span className="linkedTag">連携済み</span>
+                  ) : (
+                    <button
+                      className="linkButton small"
+                      onClick={() => onMutate(api("/google/events", {
+                        method: "POST",
+                        body: JSON.stringify({ scheduleBlockId: block.id, date, title: block.title, startTime: block.startTime, endTime: block.endTime }),
+                      }), "Googleカレンダーへ追加しました")}
+                    >
+                      Googleへ追加
+                    </button>
+                  )}
+                  <button className="iconBtn danger" title="削除" onClick={() => onMutate(api(`/schedule/${block.id}`, { method: "DELETE" }))}>×</button>
+                </div>
               </div>
             </div>
           </div>
@@ -737,21 +791,23 @@ function App() {
   return (
     <div className="appShell">
       <header className="topbar">
-        <div className="brand">
-          <span className="brandMark">DP</span>
-          <span className="brandName">DailyPilot</span>
-        </div>
+        <div className="topbarInner">
+          <div className="brand">
+            <span className="brandMark">DP</span>
+            <span className="brandName">DailyPilot</span>
+          </div>
 
-        <div className="dateNav">
-          <button className="iconBtn" title="前日" onClick={() => setDate(shiftDate(date, -1))}>‹</button>
-          <input type="date" value={date} onChange={(event) => setDate(event.target.value)} />
-          <button className="iconBtn" title="翌日" onClick={() => setDate(shiftDate(date, 1))}>›</button>
-          {date !== TODAY && <button className="ghost small" onClick={() => setDate(TODAY)}>今日へ</button>}
-        </div>
+          <div className="dateNav">
+            <button className="iconBtn" title="前日" onClick={() => setDate(shiftDate(date, -1))}>‹</button>
+            <input type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+            <button className="iconBtn" title="翌日" onClick={() => setDate(shiftDate(date, 1))}>›</button>
+            {date !== TODAY && <button className="ghost small" onClick={() => setDate(TODAY)}>今日へ</button>}
+          </div>
 
-        <div className="topbarRight">
-          <span className="userEmail">{user.email}</span>
-          <button className="ghost small" onClick={logout}>ログアウト</button>
+          <div className="topbarRight">
+            <span className="userEmail">{user.email}</span>
+            <button className="ghost small" onClick={logout}>ログアウト</button>
+          </div>
         </div>
       </header>
 
@@ -779,20 +835,15 @@ function App() {
         </div>
 
         <div className="dashboard">
-          <div className="col colLeft">
-            <TaskPanel date={date} tasks={summary.tasks} onMutate={mutate} />
-            <GoogleCalendarPanel date={date} googleSync={summary.googleSync} setMessage={setMessage} onMutate={mutate} />
-          </div>
-          <div className="col colCenter">
-            <SchedulePanel date={date} schedule={summary.schedule} overlaps={overlaps} onMutate={mutate} />
-          </div>
-          <div className="col colRight">
-            <TimerPanel date={date} actualLogs={summary.actualLogs} currentTime={currentTime} onMutate={mutate} />
-          </div>
+          <TaskPanel date={date} tasks={summary.tasks} onMutate={mutate} />
+          <SchedulePanel date={date} schedule={summary.schedule} overlaps={overlaps} googleSync={summary.googleSync} setMessage={setMessage} onMutate={mutate} />
+          <TimerPanel date={date} actualLogs={summary.actualLogs} currentTime={currentTime} onMutate={mutate} />
         </div>
 
-        <ReflectionPanel date={date} reflection={summary.reflection} setMessage={setMessage} onMutate={mutate} />
-        <ExportPanel targetExportText={targetExportText} actualExportText={actualExportText} setMessage={setMessage} />
+        <div className="dashboard dashboardBottom">
+          <ReflectionPanel date={date} reflection={summary.reflection} setMessage={setMessage} onMutate={mutate} />
+          <ExportPanel targetExportText={targetExportText} actualExportText={actualExportText} setMessage={setMessage} />
+        </div>
       </main>
 
       {message && <div className="toast">{message}</div>}
