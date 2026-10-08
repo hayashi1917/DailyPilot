@@ -14,6 +14,20 @@ import {
   startAuthorization,
   userFromOAuthAccessToken,
 } from "../oauth/provider.js";
+import {
+  cancelReminder,
+  createReminder,
+  deleteSubscription,
+  getNotificationSettings,
+  listSubscriptions,
+  listUpcomingReminders,
+  saveNotificationSettings,
+  saveSubscription,
+  sendToUser,
+  tokyoDateTimeToUnix,
+  validateNotificationSettings,
+  vapidConfig,
+} from "../notifications/service.js";
 import { ToolInputError, compactDaySummary, exportTexts, handleMcpRequest } from "../mcp/server.js";
 import {
   actualLogs,
@@ -600,6 +614,32 @@ function mcpOps(env, request, user) {
       return dayResult(log.date, { created: { id: created.id, title: created.title, durationMinutes: created.durationMinutes } });
     },
 
+    async createReminder(args) {
+      const date = resolveDate(args.date);
+      if (!isValidTime(args.time)) throw new ToolInputError("time は HH:MM 形式で指定してください");
+      const { reminder, error } = await createReminder(env, userId, { message: args.message, remindAt: tokyoDateTimeToUnix(date, args.time) });
+      if (error) throw new ToolInputError(error);
+      const devices = (await listSubscriptions(env, userId)).length;
+      return {
+        created: { id: reminder.id, message: reminder.message, remindAt: `${date} ${args.time}` },
+        ...(devices ? { devices } : { warning: "通知を受け取る端末が登録されていません。DailyPilot の「スマホ通知」で端末を登録すると届きます。" }),
+      };
+    },
+
+    async listReminders() {
+      const upcoming = await listUpcomingReminders(env, userId);
+      return {
+        reminders: upcoming.map((reminder) => ({ id: reminder.id, message: reminder.message, remindAt: new Date(reminder.remindAt * 1000).toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" }).slice(0, 16) })),
+      };
+    },
+
+    async cancelReminder(reminderId) {
+      const id = requireId(reminderId, "reminder_id");
+      const reminder = await cancelReminder(env, userId, id);
+      if (!reminder) throw new ToolInputError(`未送信のリマインダー ${id} が見つかりません`);
+      return { cancelled: reminder };
+    },
+
     async saveReflection(args) {
       const date = resolveDate(args.date);
       const current = (await summaryOf(date)).reflection;
@@ -801,6 +841,54 @@ async function handleApi({ request, env }) {
     if (request.method === "DELETE" && path.startsWith("/oauth/connections/")) {
       await revokeConnection(env, user.id, decodeURIComponent(path.split("/")[3] || ""));
       return json({ connections: await listConnections(env, user.id) });
+    }
+
+    // ===== スマホ通知（Web Push）とリマインダー =====
+    if (request.method === "GET" && path === "/notifications") {
+      const vapid = vapidConfig(env);
+      return json({
+        configured: Boolean(vapid),
+        publicKey: vapid?.publicKey || null,
+        settings: await getNotificationSettings(env, user.id),
+        subscriptions: await listSubscriptions(env, user.id),
+        reminders: await listUpcomingReminders(env, user.id),
+      });
+    }
+
+    if (request.method === "PUT" && path === "/notifications/settings") {
+      const { settings, error } = validateNotificationSettings(await request.json());
+      if (error) return badRequest(error);
+      return json({ settings: await saveNotificationSettings(env, user.id, settings) });
+    }
+
+    if (request.method === "POST" && path === "/push/subscriptions") {
+      const result = await saveSubscription(env, user.id, await request.json());
+      return result.error ? badRequest(result.error) : json(result);
+    }
+
+    if (request.method === "DELETE" && path.startsWith("/push/subscriptions/")) {
+      await deleteSubscription(env, user.id, Number(path.split("/")[3]));
+      return json({ subscriptions: await listSubscriptions(env, user.id) });
+    }
+
+    // 登録済みの全端末にテスト通知を送ります。
+    if (request.method === "POST" && path === "/push/test") {
+      if (!vapidConfig(env)) return json({ error: "VAPID 鍵が設定されていないため通知を送れません（README の「スマホ通知」を参照）" }, { status: 503 });
+      const result = await sendToUser(env, user.id, { title: "DailyPilot", body: "テスト通知です。この端末に通知が届きます。", tag: "test", url: "/" }, { urgency: "high", ttl: 600 });
+      return json({ ...result, subscriptions: await listSubscriptions(env, user.id) });
+    }
+
+    if (request.method === "POST" && path === "/reminders") {
+      const body = await request.json();
+      if (!isValidDate(body.date) || !isValidTime(body.time)) return badRequest("日付と時刻を指定してください");
+      const { error } = await createReminder(env, user.id, { message: body.message, remindAt: tokyoDateTimeToUnix(body.date, body.time) });
+      if (error) return badRequest(error);
+      return json({ reminders: await listUpcomingReminders(env, user.id) });
+    }
+
+    if (request.method === "DELETE" && path.startsWith("/reminders/")) {
+      await cancelReminder(env, user.id, Number(path.split("/")[2]));
+      return json({ reminders: await listUpcomingReminders(env, user.id) });
     }
 
     // MCP トークン一覧

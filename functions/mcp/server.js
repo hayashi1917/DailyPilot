@@ -12,6 +12,7 @@ const SERVER_INSTRUCTIONS = [
   "日付は YYYY-MM-DD、時刻は HH:MM（日本時間）で指定します。date を省略すると日本時間の今日になります。",
   "まず get_day でその日の状態とIDを確認してから、タスクや予定を追加・更新してください。",
   "タスクの達成状況は done（◯）/ partial（△）/ missed（☓）/ planned（未評価）です。",
+  "「〇時に教えて」のような依頼には create_reminder を使うと、ユーザーのスマホにプッシュ通知が届きます。",
 ].join("\n");
 
 const JSON_RPC_ERRORS = {
@@ -154,6 +155,37 @@ const TOOLS = [
       required: ["title", "start_time", "end_time"],
     },
     run: async (ops, args) => ops.addActualLog(args),
+  },
+  {
+    name: "create_reminder",
+    title: "リマインダーを作成",
+    description: "指定した日時に、ユーザーのスマホ（DailyPilot で通知を許可した端末）へプッシュ通知を送るリマインダーを作成します。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "通知に表示する内容（200文字以内）" },
+        time: timeProperty("通知する時刻（HH:MM、日本時間）"),
+        date: dateProperty,
+      },
+      required: ["message", "time"],
+    },
+    run: async (ops, args) => ops.createReminder(args),
+  },
+  {
+    name: "list_reminders",
+    title: "リマインダーの一覧",
+    description: "まだ送信されていないリマインダーを日時順に取得します。",
+    inputSchema: { type: "object", properties: {} },
+    annotations: { readOnlyHint: true },
+    run: async (ops) => ops.listReminders(),
+  },
+  {
+    name: "cancel_reminder",
+    title: "リマインダーを取り消し",
+    description: "未送信のリマインダーを取り消します。",
+    inputSchema: { type: "object", properties: { reminder_id: { type: "integer" } }, required: ["reminder_id"] },
+    annotations: { destructiveHint: true },
+    run: async (ops, args) => ops.cancelReminder(args.reminder_id),
   },
   {
     name: "save_reflection",

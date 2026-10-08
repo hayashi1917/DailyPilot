@@ -646,6 +646,255 @@ function formatUnixTime(value) {
   return new Date(value * 1000).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Tokyo" });
 }
 
+// ===== スマホ通知（Web Push） =====
+
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const IS_STANDALONE = window.matchMedia?.("(display-mode: standalone)").matches || window.navigator.standalone === true;
+const PUSH_SUPPORTED = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+
+function base64UrlToBytes(value) {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(base64 + "===".slice((base64.length + 3) % 4)), (char) => char.charCodeAt(0));
+}
+
+// 端末一覧で見分けられるよう、端末の種類とブラウザから表示名を作ります。
+function deviceLabel() {
+  const ua = navigator.userAgent;
+  const device = IS_IOS ? (/iPad/.test(ua) || navigator.maxTouchPoints > 1 && /Macintosh/.test(ua) ? "iPad" : "iPhone") : /Android/.test(ua) ? "Android" : /Mac/.test(ua) ? "Mac" : /Windows/.test(ua) ? "Windows" : "PC";
+  const browser = /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? "Chrome" : /Firefox\//.test(ua) ? "Firefox" : /Safari\//.test(ua) ? "Safari" : "ブラウザ";
+  return `${device}・${IS_STANDALONE ? "ホーム画面アプリ" : browser}`;
+}
+
+function formatReminderTime(unix) {
+  return new Date(unix * 1000).toLocaleString("ja-JP", { month: "numeric", day: "numeric", weekday: "short", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Tokyo" });
+}
+
+function defaultReminderDraft() {
+  const next = new Date(Date.now() + 60 * 60 * 1000);
+  return { message: "", date: next.toLocaleDateString("sv-SE"), time: `${String(next.getHours()).padStart(2, "0")}:00` };
+}
+
+function NotificationPanel({ setMessage }) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState(null);
+  const [settings, setSettings] = useState(null);
+  const [currentEndpoint, setCurrentEndpoint] = useState(null);
+  const [permission, setPermission] = useState(PUSH_SUPPORTED ? Notification.permission : "unsupported");
+  const [busy, setBusy] = useState(false);
+  const [reminderDraft, setReminderDraft] = useState(defaultReminderDraft);
+
+  async function load() {
+    const result = await api("/notifications");
+    setData(result);
+    setSettings(result.settings);
+    if (PUSH_SUPPORTED) {
+      const registration = await navigator.serviceWorker.getRegistration();
+      const subscription = await registration?.pushManager.getSubscription();
+      setCurrentEndpoint(subscription?.endpoint || null);
+    }
+  }
+
+  useEffect(() => {
+    if (open) load().catch((error) => setMessage(error.message));
+  }, [open]);
+
+  const thisDevice = data?.subscriptions.find((subscription) => subscription.endpoint === currentEndpoint);
+
+  async function enableOnThisDevice() {
+    setBusy(true);
+    try {
+      const result = await Notification.requestPermission();
+      setPermission(result);
+      if (result !== "granted") {
+        setMessage("通知が許可されませんでした。ブラウザの設定から DailyPilot の通知を許可してください。");
+        return;
+      }
+      const registration = await navigator.serviceWorker.ready;
+      const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64UrlToBytes(data.publicKey) });
+      const saved = await api("/push/subscriptions", { method: "POST", body: JSON.stringify({ ...subscription.toJSON(), label: deviceLabel() }) });
+      setData({ ...data, subscriptions: saved.subscriptions });
+      setCurrentEndpoint(subscription.endpoint);
+      setMessage("この端末で通知を受け取れるようになりました");
+    } catch (error) {
+      setMessage(`通知の登録に失敗しました: ${error.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeDevice(device) {
+    try {
+      if (device.endpoint === currentEndpoint) {
+        const registration = await navigator.serviceWorker.getRegistration();
+        await (await registration?.pushManager.getSubscription())?.unsubscribe();
+        setCurrentEndpoint(null);
+      }
+      const result = await api(`/push/subscriptions/${device.id}`, { method: "DELETE" });
+      setData({ ...data, subscriptions: result.subscriptions });
+      setMessage("端末の登録を解除しました");
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function sendTest() {
+    setBusy(true);
+    try {
+      const result = await api("/push/test", { method: "POST" });
+      setData({ ...data, subscriptions: result.subscriptions });
+      setMessage(result.sent ? `${result.sent}台の端末にテスト通知を送りました` : `送信できませんでした${result.errors?.length ? `（${result.errors[0]}）` : ""}`);
+    } catch (error) {
+      setMessage(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveSettings(event) {
+    event.preventDefault();
+    try {
+      const result = await api("/notifications/settings", { method: "PUT", body: JSON.stringify(settings) });
+      setSettings(result.settings);
+      setMessage("通知の設定を保存しました");
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function addReminder(event) {
+    event.preventDefault();
+    if (!reminderDraft.message.trim()) return;
+    try {
+      const result = await api("/reminders", { method: "POST", body: JSON.stringify(reminderDraft) });
+      setData({ ...data, reminders: result.reminders });
+      setReminderDraft(defaultReminderDraft());
+      setMessage("リマインダーを追加しました");
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function removeReminder(reminder) {
+    try {
+      const result = await api(`/reminders/${reminder.id}`, { method: "DELETE" });
+      setData({ ...data, reminders: result.reminders });
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  const update = (patch) => setSettings({ ...settings, ...patch });
+
+  return (
+    <details className="card collapsibleCard" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary className="cardHead">
+        <h2>スマホ通知</h2>
+        <span className="cardHint">予定の開始前・計測し忘れ・朝夜のリマインド</span>
+      </summary>
+
+      {!data ? (
+        <p className="muted">読み込み中...</p>
+      ) : !data.configured ? (
+        <p className="inlineWarning">サーバーに VAPID 鍵が設定されていないため、通知はまだ使えません（README の「スマホ通知」を参照）。</p>
+      ) : (
+        <div className="notifyGrid">
+          <section className="notifySection">
+            <h3>この端末</h3>
+            {!PUSH_SUPPORTED ? (
+              <p className="inlineWarning">
+                {IS_IOS && !IS_STANDALONE
+                  ? "iPhone / iPad では、Safari の共有ボタンから「ホーム画面に追加」し、ホーム画面の DailyPilot を開いてから通知をオンにしてください。"
+                  : "このブラウザはプッシュ通知に対応していません。"}
+              </p>
+            ) : thisDevice ? (
+              <div className="deviceStatus on">
+                <span>通知オン（{thisDevice.label || "この端末"}）</span>
+                <button className="ghost small" disabled={busy} onClick={sendTest}>テスト通知</button>
+              </div>
+            ) : (
+              <div className="deviceStatus">
+                <span>{permission === "denied" ? "通知がブロックされています。ブラウザの設定で許可してください。" : "この端末ではまだ通知を受け取っていません。"}</span>
+                <button className="primary small" disabled={busy || permission === "denied"} onClick={enableOnThisDevice}>この端末で通知を受け取る</button>
+              </div>
+            )}
+
+            <h3 className="mcpSubhead">通知する端末</h3>
+            <div className="tokenList">
+              {data.subscriptions.length === 0 && <p className="empty">登録済みの端末はありません</p>}
+              {data.subscriptions.map((device) => (
+                <div className="tokenRow" key={device.id}>
+                  <div className="logText">
+                    <strong>{device.label || "名前のない端末"}{device.endpoint === currentEndpoint ? "（この端末）" : ""}</strong>
+                    <span>最終送信 {formatUnixTime(device.lastSuccessAt)}</span>
+                  </div>
+                  <button className="ghost small" onClick={() => removeDevice(device)}>解除</button>
+                </div>
+              ))}
+            </div>
+            {data.subscriptions.length > 0 && !thisDevice && (
+              <button className="linkButton small" disabled={busy} onClick={sendTest}>登録済みの端末にテスト通知を送る</button>
+            )}
+          </section>
+
+          <section className="notifySection">
+            <h3>通知する内容</h3>
+            {settings && (
+              <form className="notifySettings" onSubmit={saveSettings}>
+                <label className="toggleRow">
+                  <input type="checkbox" checked={settings.scheduleReminderEnabled} onChange={(event) => update({ scheduleReminderEnabled: event.target.checked })} />
+                  <span>予定の
+                    <input type="number" min="1" max="120" className="inlineNumber" value={settings.scheduleLeadMinutes} onChange={(event) => update({ scheduleLeadMinutes: Number(event.target.value) })} />
+                    分前に知らせる</span>
+                </label>
+                <label className="toggleRow">
+                  <input type="checkbox" checked={settings.timerNudgeEnabled} onChange={(event) => update({ timerNudgeEnabled: event.target.checked })} />
+                  <span>予定が始まって5分たっても実績タイマーが動いていなければ知らせる</span>
+                </label>
+                <label className="toggleRow">
+                  <input type="checkbox" checked={settings.morningEnabled} onChange={(event) => update({ morningEnabled: event.target.checked })} />
+                  <span>
+                    <input type="time" value={settings.morningTime} onChange={(event) => update({ morningTime: event.target.value })} />
+                    にタスクが未登録なら、今日の計画を促す</span>
+                </label>
+                <label className="toggleRow">
+                  <input type="checkbox" checked={settings.eveningEnabled} onChange={(event) => update({ eveningEnabled: event.target.checked })} />
+                  <span>
+                    <input type="time" value={settings.eveningTime} onChange={(event) => update({ eveningTime: event.target.value })} />
+                    に振り返りが未保存なら知らせる</span>
+                </label>
+                <div className="actions">
+                  <button className="primary small">設定を保存</button>
+                </div>
+              </form>
+            )}
+
+            <h3 className="mcpSubhead">リマインダー</h3>
+            <p className="muted">Claude に「15時にES提出をリマインドして」と頼んでも登録できます。</p>
+            <form className="inlineForm reminderForm" onSubmit={addReminder}>
+              <input type="date" value={reminderDraft.date} onChange={(event) => setReminderDraft({ ...reminderDraft, date: event.target.value })} />
+              <input type="time" value={reminderDraft.time} onChange={(event) => setReminderDraft({ ...reminderDraft, time: event.target.value })} />
+              <input className="grow" placeholder="通知する内容" value={reminderDraft.message} onChange={(event) => setReminderDraft({ ...reminderDraft, message: event.target.value })} />
+              <button className="primary">追加</button>
+            </form>
+            <div className="tokenList">
+              {data.reminders.length === 0 && <p className="empty">予定されたリマインダーはありません</p>}
+              {data.reminders.map((reminder) => (
+                <div className="tokenRow" key={reminder.id}>
+                  <div className="logText">
+                    <strong>{reminder.message}</strong>
+                    <span>{formatReminderTime(reminder.remindAt)}</span>
+                  </div>
+                  <button className="iconBtn danger" title="取り消し" onClick={() => removeReminder(reminder)}>×</button>
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      )}
+    </details>
+  );
+}
+
 // Claude Code などの MCP クライアントから DailyPilot を操作するための個人アクセストークンを管理します。
 function McpPanel({ setMessage }) {
   const [open, setOpen] = useState(false);
@@ -706,7 +955,7 @@ function McpPanel({ setMessage }) {
   }
 
   return (
-    <details className="card mcpCard" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <details className="card collapsibleCard" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary className="cardHead">
         <h2>MCP連携（Claude）</h2>
         <span className="cardHint">AIエージェントからタスク・予定・振り返りを操作</span>
@@ -990,12 +1239,20 @@ function App() {
           <ExportPanel targetExportText={targetExportText} actualExportText={actualExportText} setMessage={setMessage} />
         </div>
 
+        <NotificationPanel setMessage={setMessage} />
         <McpPanel setMessage={setMessage} />
       </main>
 
       {message && <div className="toast">{message}</div>}
     </div>
   );
+}
+
+// 通知を受け取るための Service Worker を登録します（オフラインキャッシュは行いません）。
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  });
 }
 
 createRoot(document.getElementById("root")).render(<App />);
