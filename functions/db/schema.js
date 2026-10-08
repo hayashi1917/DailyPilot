@@ -126,3 +126,43 @@ export const apiTokens = sqliteTable("api_tokens", {
   lastUsedAt: integer("last_used_at"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+// 動的クライアント登録（RFC 7591）で登録された OAuth クライアント。redirect_uris は JSON 配列の文字列です。
+export const oauthClients = sqliteTable("oauth_clients", {
+  id: text("id").primaryKey(),
+  clientSecretHash: text("client_secret_hash"),
+  clientName: text("client_name"),
+  redirectUris: text("redirect_uris").notNull(),
+  tokenEndpointAuthMethod: text("token_endpoint_auth_method").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+// 認可リクエスト。同意前は userId / codeHash が null で、同意すると認可コードが発行されます。
+export const oauthAuthorizations = sqliteTable("oauth_authorizations", {
+  id: text("id").primaryKey(),
+  clientId: text("client_id").notNull(),
+  redirectUri: text("redirect_uri").notNull(),
+  codeChallenge: text("code_challenge").notNull(),
+  state: text("state"),
+  scope: text("scope"),
+  resource: text("resource"),
+  userId: integer("user_id"),
+  codeHash: text("code_hash").unique(),
+  expiresAt: integer("expires_at").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+// OAuth で発行したアクセストークン / リフレッシュトークン。どちらもハッシュだけを保存します。
+export const oauthTokens = sqliteTable("oauth_tokens", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  clientId: text("client_id").notNull(),
+  accessTokenHash: text("access_token_hash").notNull().unique(),
+  accessExpiresAt: integer("access_expires_at").notNull(),
+  refreshTokenHash: text("refresh_token_hash").notNull().unique(),
+  refreshExpiresAt: integer("refresh_expires_at").notNull(),
+  scope: text("scope"),
+  resource: text("resource"),
+  lastUsedAt: integer("last_used_at"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});

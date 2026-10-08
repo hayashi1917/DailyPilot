@@ -587,7 +587,14 @@ button.small { padding: 5px 10px; font-size: 13px; }
 .issuedToken code { background: var(--surface); }
 
 .mcpSetup { margin-bottom: 14px; }
-.mcpSetup .muted { margin: 8px 0 0; font-size: 12px; }
+
+/* claude.ai（OAuth）と Claude Code（トークン）の2つの接続方法を並べます。 */
+.mcpGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.mcpSection { min-width: 0; }
+.mcpSection .muted { margin-bottom: 10px; }
+.mcpSubhead { margin-top: 16px !important; }
+.mcpSteps { margin: 0 0 10px; padding-left: 20px; color: var(--text-2); font-size: 13px; }
+.mcpSteps li + li { margin-top: 2px; }
 
 .tokenList { display: grid; gap: 8px; }
 .tokenRow {
@@ -663,6 +670,34 @@ button.small { padding: 5px 10px; font-size: 13px; }
 .authTabs button { padding: 7px; color: var(--text-3); border-radius: 6px; }
 .authTabs button.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow-card); }
 
+.authNotice {
+  margin: -8px 0 18px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* OAuth 同意画面 */
+.consentDetails {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 16px;
+  margin: 0 0 22px;
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 13px;
+}
+.consentDetails dt { color: var(--text-3); font-weight: 600; white-space: nowrap; }
+.consentDetails dd { margin: 0; overflow-wrap: anywhere; }
+.consentActions { display: grid; grid-template-columns: 1fr 2fr; gap: 10px; }
+.consentActions button { padding: 10px; }
+.consentBack { display: inline-block; margin-top: 16px; color: var(--primary); font-weight: 600; }
+
 .stack { display: grid; gap: 10px; }
 .stack input { padding: 10px 12px; }
 .stack button.primary { padding: 10px; margin-top: 4px; }
@@ -685,7 +720,7 @@ button.small { padding: 5px 10px; font-size: 13px; }
   .page { padding-top: 16px; padding-bottom: 48px; }
   .dashboard { grid-template-columns: 1fr; }
   .dashboard > :nth-child(3) { grid-column: auto; }
-  .exportSplit, .reflectionGrid { grid-template-columns: 1fr; }
+  .exportSplit, .reflectionGrid, .mcpGrid { grid-template-columns: 1fr; }
   .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; width: 100%; }
   .stat { min-width: 0; padding: 8px 10px; }
   .statValue { font-size: 15px; white-space: nowrap; }

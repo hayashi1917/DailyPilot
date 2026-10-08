@@ -1,5 +1,19 @@
 import { drizzle } from "drizzle-orm/d1";
 import { and, between, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { randomId, sha256Hex } from "../lib/crypto.js";
+import {
+  corsPreflight,
+  decideAuthorization,
+  describeAuthorization,
+  exchangeToken,
+  isOAuthAccessToken,
+  listConnections,
+  mcpWwwAuthenticate,
+  registerClient,
+  revokeConnection,
+  startAuthorization,
+  userFromOAuthAccessToken,
+} from "../oauth/provider.js";
 import { ToolInputError, compactDaySummary, exportTexts, handleMcpRequest } from "../mcp/server.js";
 import {
   actualLogs,
@@ -37,12 +51,6 @@ function db(env) {
 
 function getCookie(request, name) {
   return (request.headers.get("cookie") || "").split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1);
-}
-
-function randomId(bytes = 24) {
-  const values = new Uint8Array(bytes);
-  crypto.getRandomValues(values);
-  return Array.from(values, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function sessionCookie(value, request, maxAge = SESSION_TTL_SECONDS) {
@@ -118,16 +126,18 @@ async function currentUser(env, request) {
 // トークンは発行時に一度だけ表示し、DBには SHA-256 ハッシュだけを保存します。
 const API_TOKEN_PREFIX = "dpk_";
 
-async function sha256Hex(value) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+function bearerToken(request) {
+  return (request.headers.get("authorization") || "").match(/^Bearer\s+(\S+)$/i)?.[1] || null;
 }
 
+// MCP の認証。画面で発行した個人アクセストークン（dpk_）と、OAuth のアクセストークン（dpa_）の両方を受け付けます。
 async function userFromBearerToken(env, request) {
-  const match = (request.headers.get("authorization") || "").match(/^Bearer\s+(\S+)$/i);
-  if (!match || !match[1].startsWith(API_TOKEN_PREFIX)) return null;
+  const bearer = bearerToken(request);
+  if (!bearer) return null;
+  if (isOAuthAccessToken(bearer)) return userFromOAuthAccessToken(env, bearer);
+  if (!bearer.startsWith(API_TOKEN_PREFIX)) return null;
   const appDb = db(env);
-  const token = await appDb.select().from(apiTokens).where(eq(apiTokens.tokenHash, await sha256Hex(match[1]))).get();
+  const token = await appDb.select().from(apiTokens).where(eq(apiTokens.tokenHash, await sha256Hex(bearer))).get();
   if (!token) return null;
   // 最終利用時刻は5分に1回だけ更新し、D1 の書き込み回数を抑えます。
   const now = Math.floor(Date.now() / 1000);
@@ -752,14 +762,46 @@ async function handleApi({ request, env }) {
       return json({ ok: true }, { headers });
     }
 
-    // MCP エンドポイント。Cookie ではなく Authorization: Bearer の個人アクセストークンで認証します。
+    // MCP エンドポイント。Cookie ではなく Authorization: Bearer（個人アクセストークン / OAuth）で認証します。
     if (path === "/mcp") {
+      if (request.method === "OPTIONS") return corsPreflight();
       const mcpUser = await userFromBearerToken(env, request);
-      return handleMcpRequest(request, mcpUser ? mcpOps(env, request, mcpUser) : null);
+      return handleMcpRequest(request, mcpUser ? mcpOps(env, request, mcpUser) : null, {
+        wwwAuthenticate: mcpWwwAuthenticate(requestOrigin(request), Boolean(bearerToken(request))),
+      });
     }
+
+    // OAuth 2.1（claude.ai などのカスタムコネクタ用）。詳細は functions/oauth/provider.js を参照してください。
+    if (request.method === "OPTIONS" && path.startsWith("/oauth/")) return corsPreflight();
+    if (request.method === "POST" && path === "/oauth/register") return registerClient(env, request);
+    if (request.method === "GET" && path === "/oauth/authorize") return startAuthorization(env, request, requestOrigin(request));
+    if (request.method === "POST" && path === "/oauth/token") return exchangeToken(env, request);
 
     const user = await requireUser(env, request).catch((response) => response);
     if (user instanceof Response) return user;
+
+    // OAuth 同意画面に表示する連携リクエストの内容
+    if (request.method === "GET" && path.startsWith("/oauth/requests/")) {
+      return describeAuthorization(env, decodeURIComponent(path.split("/")[3] || ""));
+    }
+
+    // OAuth 同意 / 拒否。他サイトから送信させられないよう、Origin が自サイトであることも確認します。
+    const decision = path.match(/^\/oauth\/requests\/([^/]+)\/(approve|deny)$/);
+    if (request.method === "POST" && decision) {
+      const origin = request.headers.get("origin");
+      if (origin && origin !== requestOrigin(request)) return json({ error: "Invalid origin" }, { status: 403 });
+      return decideAuthorization(env, requestOrigin(request), decodeURIComponent(decision[1]), user, decision[2] === "approve");
+    }
+
+    // OAuth で接続中のアプリ一覧と連携解除
+    if (request.method === "GET" && path === "/oauth/connections") {
+      return json({ connections: await listConnections(env, user.id) });
+    }
+
+    if (request.method === "DELETE" && path.startsWith("/oauth/connections/")) {
+      await revokeConnection(env, user.id, decodeURIComponent(path.split("/")[3] || ""));
+      return json({ connections: await listConnections(env, user.id) });
+    }
 
     // MCP トークン一覧
     if (request.method === "GET" && path === "/mcp-tokens") {
