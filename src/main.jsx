@@ -13,6 +13,8 @@ import {
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
 // toISOString() は UTC になり、日本時間の0〜9時に前日扱いになるため、ローカル日付で求めます。
 const TODAY = new Date().toLocaleDateString("sv-SE");
+// claude.ai などから OAuth 連携で開かれたときの連携リクエストID（同意画面を表示します）。
+const OAUTH_REQUEST_ID = new URLSearchParams(window.location.search).get("oauth_request");
 
 async function api(path, init = {}) {
   const response = await fetch(`/api${path}`, {
@@ -54,7 +56,7 @@ function hasScheduleOverlap(schedule) {
   );
 }
 
-function AuthScreen({ onAuthenticated }) {
+function AuthScreen({ onAuthenticated, notice }) {
   const [mode, setMode] = useState("login");
   const [form, setForm] = useState({ email: "", password: "", name: "" });
   const [message, setMessage] = useState("");
@@ -85,6 +87,7 @@ function AuthScreen({ onAuthenticated }) {
         </div>
         <h1>一日の設計と振り返りを、ひとつの画面で。</h1>
         <p className="authLead">目標タスク・スケジュール・実績・振り返りをまとめて管理し、Googleカレンダーとも同期できます。</p>
+        {notice && <p className="authNotice">{notice}</p>}
 
         <div className="authTabs" role="tablist">
           <button
@@ -649,6 +652,7 @@ function McpPanel({ setMessage }) {
   const [tokens, setTokens] = useState([]);
   const [name, setName] = useState("Claude Code");
   const [issuedToken, setIssuedToken] = useState("");
+  const [connections, setConnections] = useState([]);
 
   const endpoint = `${window.location.origin}/api/mcp`;
   const command = `claude mcp add --transport http daily-pilot ${endpoint} --header "Authorization: Bearer ${issuedToken || "<トークン>"}"`;
@@ -658,7 +662,21 @@ function McpPanel({ setMessage }) {
     api("/mcp-tokens")
       .then((data) => setTokens(data.tokens))
       .catch((error) => setMessage(error.message));
+    api("/oauth/connections")
+      .then((data) => setConnections(data.connections))
+      .catch((error) => setMessage(error.message));
   }, [open, setMessage]);
+
+  async function revokeConnection(connection) {
+    if (!window.confirm(`「${connection.clientName || connection.redirectHost}」との連携を解除しますか？`)) return;
+    try {
+      const data = await api(`/oauth/connections/${encodeURIComponent(connection.clientId)}`, { method: "DELETE" });
+      setConnections(data.connections);
+      setMessage("連携を解除しました");
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
 
   async function issueToken(event) {
     event.preventDefault();
@@ -690,52 +708,151 @@ function McpPanel({ setMessage }) {
   return (
     <details className="card mcpCard" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary className="cardHead">
-        <h2>MCP連携（Claude Code など）</h2>
+        <h2>MCP連携（Claude）</h2>
         <span className="cardHint">AIエージェントからタスク・予定・振り返りを操作</span>
       </summary>
 
       <p className="muted">
-        個人用トークンを発行すると、Claude Code などの MCP クライアントから DailyPilot のタスク追加・達成状況の更新・振り返りの保存などができるようになります。
-        トークンはアカウントのパスワードと同じように扱ってください。
+        Claude などの MCP クライアントから、DailyPilot のタスク追加・達成状況の更新・振り返りの保存などができるようになります。
       </p>
 
-      <form className="inlineForm" onSubmit={issueToken}>
-        <input placeholder="用途（例: Claude Code）" value={name} onChange={(event) => setName(event.target.value)} />
-        <button className="primary">トークンを発行</button>
-      </form>
-
-      {issuedToken && (
-        <div className="issuedToken">
-          <p>トークンは<strong>この画面でしか表示されません</strong>。いまコピーして保管してください。</p>
+      <div className="mcpGrid">
+        <section className="mcpSection">
+          <h3>claude.ai / Claude Desktop / スマホの Claude アプリ</h3>
+          <ol className="mcpSteps">
+            <li>claude.ai の「設定 → コネクタ → カスタムコネクタを追加」を開く</li>
+            <li>次の URL を貼り付けて追加し、「連携/接続」を押す</li>
+            <li>DailyPilot の画面で「許可する」を押す</li>
+          </ol>
           <div className="copyRow">
-            <code>{issuedToken}</code>
-            <button className="ghost small" onClick={() => copy("トークン", issuedToken)}>コピー</button>
+            <code>{endpoint}</code>
+            <button className="ghost small" onClick={() => copy("URL", endpoint)}>コピー</button>
           </div>
-        </div>
-      )}
 
-      <div className="mcpSetup">
-        <h3>Claude Code への登録コマンド</h3>
-        <div className="copyRow">
-          <code>{command}</code>
-          <button className="ghost small" onClick={() => copy("コマンド", command)}>コピー</button>
-        </div>
-        <p className="muted">claude.ai / Claude Desktop のカスタムコネクタは OAuth 認証が必要なため、現時点では未対応です。</p>
-      </div>
+          <h3 className="mcpSubhead">接続中のアプリ</h3>
+          <div className="tokenList">
+            {connections.length === 0 && <p className="empty">接続中のアプリはありません</p>}
+            {connections.map((connection) => (
+              <div className="tokenRow" key={connection.clientId}>
+                <div className="logText">
+                  <strong>{connection.clientName || "名前のないアプリ"}</strong>
+                  <span>{connection.redirectHost}・最終利用 {formatUnixTime(connection.lastUsedAt)}</span>
+                </div>
+                <button className="ghost small" onClick={() => revokeConnection(connection)}>解除</button>
+              </div>
+            ))}
+          </div>
+        </section>
 
-      <div className="tokenList">
-        {tokens.length === 0 && <p className="empty">発行済みのトークンはありません</p>}
-        {tokens.map((token) => (
-          <div className="tokenRow" key={token.id}>
-            <div className="logText">
-              <strong>{token.name}</strong>
-              <span>{token.tokenPrefix}…・最終利用 {formatUnixTime(token.lastUsedAt)}</span>
+        <section className="mcpSection">
+          <h3>Claude Code（個人用トークン）</h3>
+          <p className="muted">トークンはアカウントのパスワードと同じように扱ってください。</p>
+
+          <form className="inlineForm" onSubmit={issueToken}>
+            <input placeholder="用途（例: Claude Code）" value={name} onChange={(event) => setName(event.target.value)} />
+            <button className="primary">トークンを発行</button>
+          </form>
+
+          {issuedToken && (
+            <div className="issuedToken">
+              <p>トークンは<strong>この画面でしか表示されません</strong>。いまコピーして保管してください。</p>
+              <div className="copyRow">
+                <code>{issuedToken}</code>
+                <button className="ghost small" onClick={() => copy("トークン", issuedToken)}>コピー</button>
+              </div>
             </div>
-            <button className="ghost small" onClick={() => revokeToken(token)}>失効</button>
+          )}
+
+          <div className="mcpSetup">
+            <h3 className="mcpSubhead">登録コマンド</h3>
+            <div className="copyRow">
+              <code>{command}</code>
+              <button className="ghost small" onClick={() => copy("コマンド", command)}>コピー</button>
+            </div>
           </div>
-        ))}
+
+          <div className="tokenList">
+            {tokens.length === 0 && <p className="empty">発行済みのトークンはありません</p>}
+            {tokens.map((token) => (
+              <div className="tokenRow" key={token.id}>
+                <div className="logText">
+                  <strong>{token.name}</strong>
+                  <span>{token.tokenPrefix}…・最終利用 {formatUnixTime(token.lastUsedAt)}</span>
+                </div>
+                <button className="ghost small" onClick={() => revokeToken(token)}>失効</button>
+              </div>
+            ))}
+          </div>
+        </section>
       </div>
     </details>
+  );
+}
+
+// OAuth の同意画面。claude.ai などの MCP クライアントに DailyPilot へのアクセスを許可するかを確認します。
+function ConsentScreen({ requestId, user }) {
+  const [request, setRequest] = useState(null);
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    api(`/oauth/requests/${encodeURIComponent(requestId)}`)
+      .then(setRequest)
+      .catch((loadError) => setError(loadError.message));
+  }, [requestId]);
+
+  async function decide(decision) {
+    setSubmitting(true);
+    try {
+      const data = await api(`/oauth/requests/${encodeURIComponent(requestId)}/${decision}`, { method: "POST" });
+      window.location.href = data.redirectUrl;
+    } catch (decideError) {
+      setError(decideError.message);
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="authShell">
+      <section className="authCard">
+        <div className="authBrand">
+          <span className="brandMark">DP</span>
+          <span className="brandName">DailyPilot</span>
+        </div>
+
+        {error ? (
+          <>
+            <h1>連携を続けられませんでした</h1>
+            <p className="formError">{error}</p>
+            <a className="consentBack" href="/">DailyPilot を開く</a>
+          </>
+        ) : !request ? (
+          <p className="authLead">連携リクエストを確認しています...</p>
+        ) : (
+          <>
+            <h1>「{request.clientName}」に DailyPilot へのアクセスを許可しますか？</h1>
+            <p className="authLead">
+              許可すると、このアプリが MCP 経由であなたの DailyPilot を操作できるようになります。
+              連携はあとから「MCP連携」パネルで解除できます。
+            </p>
+            <dl className="consentDetails">
+              <dt>戻り先</dt>
+              <dd>{request.redirectHost}</dd>
+              <dt>アカウント</dt>
+              <dd>{user.email}</dd>
+              <dt>できること</dt>
+              <dd>タスク・予定・実績ログ・振り返りの閲覧、追加、更新、削除</dd>
+            </dl>
+            <div className="consentActions">
+              <button className="ghost" disabled={submitting} onClick={() => decide("deny")}>拒否</button>
+              <button className="primary" disabled={submitting} onClick={() => decide("approve")}>
+                {submitting ? "処理中..." : "許可する"}
+              </button>
+            </div>
+          </>
+        )}
+      </section>
+    </main>
   );
 }
 
@@ -756,7 +873,7 @@ function App() {
 
   // 対象日を開くたびに日次サマリーを取得します。API側でGoogle自動同期も実行されます。
   useEffect(() => {
-    if (user) loadSummary();
+    if (user && !OAUTH_REQUEST_ID) loadSummary();
   }, [user, date]);
 
   // 実行中タイマーの経過分数をテキスト出力へ反映するため、定期的に現在時刻を更新します。
@@ -802,7 +919,15 @@ function App() {
   const overlaps = summary ? hasScheduleOverlap(summary.schedule) : false;
 
   if (checkingAuth) return <main className="loading">読み込み中...</main>;
-  if (!user) return <AuthScreen onAuthenticated={setUser} />;
+  if (!user) {
+    return (
+      <AuthScreen
+        onAuthenticated={setUser}
+        notice={OAUTH_REQUEST_ID ? "Claude などのアプリと連携するには、DailyPilot にログインしてください。" : ""}
+      />
+    );
+  }
+  if (OAUTH_REQUEST_ID) return <ConsentScreen requestId={OAUTH_REQUEST_ID} user={user} />;
   if (!summary) return <main className="loading">DailyPilotを準備中...</main>;
 
   const doneCount = summary.tasks.filter((task) => task.status === "done").length;

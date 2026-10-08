@@ -17,7 +17,7 @@ DailyPilot は、1日の目標タスク、予定、実績ログ、振り返り�
   - 選択日の Googleカレンダー予定の自動同期
   - Googleカレンダー予定の DailyPilot スケジュールへの取り込み
   - DailyPilot の予定ブロックの Googleカレンダー追加
-- MCP サーバー（Claude Code などの AI エージェントからタスク・予定・実績・振り返りを操作）
+- MCP サーバー（claude.ai・Claude アプリ・Claude Code からタスク・予定・実績・振り返りを操作。OAuth 2.1 対応）
 - 複数ユーザー運用を想定したメールアドレス/パスワード認証
 - ユーザー単位のデータ分離
 - Google OAuth トークンの暗号化保存
@@ -44,9 +44,13 @@ DailyPilot は、1日の目標タスク、予定、実績ログ、振り返り�
 - `src/styles.css`: 画面全体のスタイル。カードUI、タイムライン、認証画面、レスポンシブ対応をまとめています。
 - `functions/api/[[path]].js`: Cloudflare Pages Functions のAPI。認証、日次サマリー、タスク、予定、タイマー、振り返り、Google OAuth/同期を機能ごとのコメントで整理しています。
 - `functions/mcp/server.js`: MCP サーバー（Streamable HTTP・ステートレス）のプロトコル処理とツール定義です。ツールの実処理は API 側と共通の関数を使います。
+- `functions/oauth/provider.js`: claude.ai などのカスタムコネクタ向けの OAuth 2.1 認可サーバー（動的クライアント登録・PKCE・トークン発行）です。
+- `functions/.well-known/[[path]].js`: OAuth のメタデータ（`oauth-protected-resource` / `oauth-authorization-server`）を返します。
+- `functions/lib/crypto.js`: 乱数ID・ハッシュなど共通の暗号処理です。
 - `functions/db/schema.js`: Drizzle ORM の schema 定義。各テーブルの役割を日本語コメントで説明しています。
 - `shared/exportText.js`: テキスト出力の組み立て処理。画面と MCP サーバーで共通利用します。
-- `migrations/`: D1 に適用するテーブル定義です（`0001_initial.sql` 初期テーブル、`0002_api_tokens.sql` MCP用トークン）。
+- `migrations/`: D1 に適用するテーブル定義です（`0001_initial.sql` 初期テーブル、`0002_api_tokens.sql` MCP用トークン、`0003_oauth.sql` OAuth）。
+- `public/_headers`: 静的ファイルのセキュリティヘッダー（OAuth 同意画面のクリックジャッキング対策）です。
 
 ## Cloudflare セットアップ手順
 
@@ -102,6 +106,7 @@ wrangler d1 migrations apply daily-pilot --local
 - `oauth_states`: Google OAuth の CSRF 対策用 state
 - `calendar_syncs`: Googleカレンダー自動同期の最終同期時刻
 - `api_tokens`: MCP クライアント用の個人アクセストークン（SHA-256 ハッシュのみ保存）
+- `oauth_clients` / `oauth_authorizations` / `oauth_tokens`: OAuth のクライアント登録・認可リクエスト・発行済みトークン（シークレットやトークンはハッシュのみ保存）
 
 ### 4. Cloudflare Pages プロジェクトを作成・デプロイする
 
@@ -163,22 +168,30 @@ CALENDAR_AUTO_SYNC_MINUTES = "15"
 - 課金: Workers AI の無料枠（Neurons）内で利用できます。超過分は Cloudflare の従量課金です
 - ローカル開発: `wrangler pages dev` 実行時は Cloudflare アカウント経由でリモート推論するため、`wrangler login` 済みである必要があります
 
-## MCP連携（Claude Code など）
+## MCP連携（claude.ai / Claude アプリ / Claude Code）
 
-DailyPilot は `/api/mcp` で MCP（Model Context Protocol）サーバーを提供します。Claude Code などの MCP クライアントから、会話の中でタスクの追加や達成状況の更新、振り返りの保存などができます。
+DailyPilot は `/api/mcp` で MCP（Model Context Protocol）サーバーを提供します。Claude から、会話の中でタスクの追加や達成状況の更新、振り返りの保存などができます。
 
-### 使い方
+### claude.ai / Claude Desktop / スマホの Claude アプリで使う（OAuth）
+
+1. claude.ai の「設定 → コネクタ → カスタムコネクタを追加」で、URL に `https://<your-domain>/api/mcp` を入力して追加します。
+2. 「連携/接続」を押すと DailyPilot の画面が開くので、ログインして「許可する」を押します。
+3. 一度つなげば、claude.ai・Claude Desktop・スマホの Claude アプリのどれからでも使えます。
+
+接続中のアプリは「MCP連携」パネルの「接続中のアプリ」から解除できます。
+
+### Claude Code で使う（個人用トークン）
 
 1. DailyPilot にログインし、画面下部の「MCP連携」を開いて「トークンを発行」を押します。トークンはこのときしか表示されないので、すぐにコピーしてください。
-2. 画面に表示される登録コマンドを Claude Code で実行します。
+2. 画面に表示される登録コマンドを Claude Code で実行します（Claude Code も OAuth に対応しているため、`--header` を付けずに追加してブラウザで許可する方法でも接続できます）。
 
 ```bash
 claude mcp add --transport http daily-pilot https://<your-domain>/api/mcp --header "Authorization: Bearer <トークン>"
 ```
 
-3. Claude Code で「今日のタスクを見せて」「Sで『ES提出』を追加して」「ES提出を完了にして」「今週の振り返りをまとめて」のように頼むと、MCP ツール経由で DailyPilot を操作します。
-
 不要になったトークンは「MCP連携」の一覧から失効できます。
+
+どちらの方法でも、「今日のタスクを見せて」「Sで『ES提出』を追加して」「ES提出を完了にして」「今週の振り返りをまとめて」のように頼むと、MCP ツール経由で DailyPilot を操作します。
 
 ### 提供ツール
 
@@ -196,13 +209,14 @@ claude mcp add --transport http daily-pilot https://<your-domain>/api/mcp --head
 ### 仕組みと料金
 
 - Streamable HTTP トランスポートを、セッションを持たないステートレス構成（JSON レスポンスのみ）で実装しています。Pages Functions だけで動作し、Durable Objects や追加サービスは不要です。
-- 認証は個人アクセストークン（`Authorization: Bearer`）です。DB にはトークンの SHA-256 ハッシュのみを保存します。
+- 認証は OAuth 2.1（MCP 認可仕様）と個人アクセストークンの2種類です。どちらも `Authorization: Bearer` で送られ、DB にはトークンの SHA-256 ハッシュのみを保存します。
+- OAuth は、Protected Resource Metadata（RFC 9728）・Authorization Server Metadata（RFC 8414）・動的クライアント登録（RFC 7591）・PKCE（S256 必須）・Resource Indicators（RFC 8707）に対応しています。アクセストークンは1時間、リフレッシュトークンは90日有効で、更新のたびにローテーションします。
+- OAuth の状態はすべて D1 に保存するため、KV などの追加サービスは不要です。
 - MCP サーバー自体は LLM を呼び出さないため、Workers / D1 の無料枠内で利用できます（推論は MCP クライアント側で行われます）。
-- claude.ai / Claude Desktop のカスタムコネクタは OAuth 認証が必要なため、現時点では未対応です。
 
 ### 本番環境への反映
 
-MCP 用のテーブルを追加しているため、デプロイ前に本番 D1 へマイグレーションを適用してください。
+MCP / OAuth 用のテーブルを追加しているため、デプロイ前に本番 D1 へマイグレーションを適用してください。
 
 ```bash
 npm run db:migrate:prod

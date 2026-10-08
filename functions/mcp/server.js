@@ -214,8 +214,11 @@ export function exportTexts(summary) {
 
 // ===== JSON-RPC / HTTP 処理 =====
 
+// Cookie を使わない Bearer 認証なので、ブラウザ型の MCP クライアント（MCP Inspector など）向けに CORS を許可します。
+const CORS_HEADERS = { "access-control-allow-origin": "*", "access-control-expose-headers": "www-authenticate" };
+
 function jsonResponse(body, status = 200, headers = {}) {
-  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", ...headers } });
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", ...CORS_HEADERS, ...headers } });
 }
 
 function rpcResult(id, result) {
@@ -264,14 +267,15 @@ async function handleMessage(message, ops) {
   }
 }
 
-// /api/mcp へのリクエストを処理します。ops が null の場合は認証失敗として 401 を返します。
-export async function handleMcpRequest(request, ops) {
+// /api/mcp へのリクエストを処理します。ops が null の場合は認証失敗として 401 を返し、
+// WWW-Authenticate で OAuth の設定場所（Protected Resource Metadata）をクライアントに伝えます。
+export async function handleMcpRequest(request, ops, { wwwAuthenticate }) {
   if (request.method !== "POST") {
     // サーバーからの通知ストリーム（GET）やセッション削除（DELETE）は提供しません。
-    return new Response(null, { status: 405, headers: { allow: "POST" } });
+    return new Response(null, { status: 405, headers: { allow: "POST", ...CORS_HEADERS } });
   }
   if (!ops) {
-    return jsonResponse(rpcError(null, JSON_RPC_ERRORS.invalidRequest, "Authorization: Bearer <DailyPilotのMCPトークン> が必要です"), 401, { "www-authenticate": 'Bearer realm="DailyPilot MCP"' });
+    return jsonResponse(rpcError(null, JSON_RPC_ERRORS.invalidRequest, "認証が必要です（OAuth、または Authorization: Bearer <DailyPilotのMCPトークン>）"), 401, { "www-authenticate": wwwAuthenticate });
   }
 
   let message;
