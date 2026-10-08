@@ -240,7 +240,7 @@ button.small { padding: 5px 10px; font-size: 13px; }
 }
 
 /* 下段: 振り返りとテキスト出力を横並びにします。 */
-.dashboardBottom { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.dashboardBottom { grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); }
 
 /* ---------- カード ---------- */
 .card {
