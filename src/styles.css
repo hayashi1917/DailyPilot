@@ -627,7 +627,7 @@ button.small { padding: 5px 10px; font-size: 13px; }
 }
 
 @media (max-width: 1100px) {
-  .dashboard { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .dashboard:not(.dashboardBottom) { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .dashboard > :nth-child(3) { grid-column: span 2; }
 }
 
