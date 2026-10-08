@@ -115,3 +115,14 @@ export const calendarSyncs = sqliteTable("calendar_syncs", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => ({ userProviderDate: uniqueIndex("calendar_sync_user_provider_date_unique").on(table.userId, table.provider, table.date) }));
+
+// MCP クライアントから使う個人用アクセストークン。本体は保存せず SHA-256 ハッシュだけを持ちます。
+export const apiTokens = sqliteTable("api_tokens", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  name: text("name").notNull(),
+  tokenHash: text("token_hash").notNull().unique(),
+  tokenPrefix: text("token_prefix").notNull(),
+  lastUsedAt: integer("last_used_at"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});

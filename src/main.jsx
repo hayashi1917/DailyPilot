@@ -1,11 +1,15 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
+import {
+  PRIORITIES,
+  STATUS_LABELS,
+  STATUS_MARKS,
+  buildActualExportText,
+  buildTargetExportText,
+  formatLogTime,
+} from "../shared/exportText.js";
 
-// 優先度・達成状況など、画面とテキスト出力で共通利用する定数です。
-const PRIORITIES = ["S", "A", "B"];
-const STATUS_MARKS = { planned: "", done: "◯", partial: "△", missed: "☓" };
-const STATUS_LABELS = { planned: "未評価", done: "完了", partial: "一部", missed: "未達" };
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
 // toISOString() は UTC になり、日本時間の0〜9時に前日扱いになるため、ローカル日付で求めます。
 const TODAY = new Date().toLocaleDateString("sv-SE");
@@ -22,11 +26,6 @@ async function api(path, init = {}) {
   }
 
   return response.json();
-}
-
-function japaneseDate(value) {
-  const parsed = new Date(`${value}T00:00:00+09:00`);
-  return `${parsed.getMonth() + 1}月${parsed.getDate()}日`;
 }
 
 function japaneseDateWithWeekday(value) {
@@ -53,86 +52,6 @@ function hasScheduleOverlap(schedule) {
       minutes(other.startTime) < minutes(block.endTime),
     ),
   );
-}
-
-function formatLogTime(value) {
-  return new Date(value).toLocaleTimeString("ja-JP", {
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "Asia/Tokyo",
-  });
-}
-
-function buildTaskLines(tasks, { includeStatusMarks = true } = {}) {
-  return PRIORITIES.flatMap((priority) => {
-    const priorityTasks = tasks.filter((task) => task.priority === priority);
-    if (priorityTasks.length === 0) return [];
-
-    const separator = priority === "A" ? "." : ",";
-    const taskText = priorityTasks
-      .map((task) => `${task.title}${includeStatusMarks ? STATUS_MARKS[task.status] : ""}`)
-      .join(separator);
-    return [`${priority}：${taskText}`];
-  });
-}
-
-function buildTargetScheduleLines(schedule) {
-  if (schedule.length === 0) return ["（目標スケジュール未登録）"];
-  return schedule.map((block) => `${block.startTime} - ${block.endTime} ${block.title}`);
-}
-
-function buildActualScheduleLines(actualLogs, now = new Date()) {
-  if (actualLogs.length === 0) return ["（実際のスケジュール未記録）"];
-
-  return actualLogs.map((log) => {
-    const start = formatLogTime(log.startedAt);
-    const isRunning = !log.endedAt;
-    const end = isRunning ? "実行中" : formatLogTime(log.endedAt);
-    const durationMinutes = isRunning
-      ? Math.max(1, Math.round((now.getTime() - new Date(log.startedAt).getTime()) / 60000))
-      : log.durationMinutes;
-    const duration = durationMinutes ? `（${isRunning ? "経過" : ""}${durationMinutes}分）` : "";
-    return `${start} - ${end} ${log.title}${duration}`;
-  });
-}
-
-function buildTargetExportText(summary) {
-  const targetTaskLines = buildTaskLines(summary.tasks, { includeStatusMarks: false });
-
-  return [
-    `【${japaneseDate(summary.day.date)} 目標】`,
-    "目標タスク",
-    ...(targetTaskLines.length ? targetTaskLines : ["タスクなし"]),
-    "",
-    "目標スケジュール",
-    ...buildTargetScheduleLines(summary.schedule),
-  ].join("\n");
-}
-
-function buildActualExportText(summary, now = new Date()) {
-  const actualTaskLines = buildTaskLines(summary.tasks);
-  const reflectionLines = [
-    "振り返り",
-    `・タスク達成率 ${summary.reflection.achievementRate}%`,
-    "・理由",
-    summary.reflection.reason || "未入力",
-    "・改善点",
-    summary.reflection.improvement || "未入力",
-  ];
-
-  if (summary.reflection.goodPoints) reflectionLines.push("・良かった点", summary.reflection.goodPoints);
-  if (summary.reflection.tomorrowNotes) reflectionLines.push("・明日へのメモ", summary.reflection.tomorrowNotes);
-
-  return [
-    `【${japaneseDate(summary.day.date)} 実際】`,
-    "タスク完了状況",
-    ...(actualTaskLines.length ? actualTaskLines : ["タスクなし"]),
-    "",
-    "実際のスケジュール（リアルタイム計測）",
-    ...buildActualScheduleLines(summary.actualLogs, now),
-    "",
-    ...reflectionLines,
-  ].join("\n");
 }
 
 function AuthScreen({ onAuthenticated }) {
@@ -719,6 +638,107 @@ function ExportPanel({ targetExportText, actualExportText, setMessage }) {
   );
 }
 
+function formatUnixTime(value) {
+  if (!value) return "未使用";
+  return new Date(value * 1000).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Tokyo" });
+}
+
+// Claude Code などの MCP クライアントから DailyPilot を操作するための個人アクセストークンを管理します。
+function McpPanel({ setMessage }) {
+  const [open, setOpen] = useState(false);
+  const [tokens, setTokens] = useState([]);
+  const [name, setName] = useState("Claude Code");
+  const [issuedToken, setIssuedToken] = useState("");
+
+  const endpoint = `${window.location.origin}/api/mcp`;
+  const command = `claude mcp add --transport http daily-pilot ${endpoint} --header "Authorization: Bearer ${issuedToken || "<トークン>"}"`;
+
+  useEffect(() => {
+    if (!open) return;
+    api("/mcp-tokens")
+      .then((data) => setTokens(data.tokens))
+      .catch((error) => setMessage(error.message));
+  }, [open, setMessage]);
+
+  async function issueToken(event) {
+    event.preventDefault();
+    try {
+      const data = await api("/mcp-tokens", { method: "POST", body: JSON.stringify({ name }) });
+      setTokens(data.tokens);
+      setIssuedToken(data.token);
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function revokeToken(token) {
+    if (!window.confirm(`「${token.name}」のトークンを失効させますか？このトークンを使っているクライアントは接続できなくなります。`)) return;
+    try {
+      const data = await api(`/mcp-tokens/${token.id}`, { method: "DELETE" });
+      setTokens(data.tokens);
+      setMessage("トークンを失効させました");
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function copy(label, text) {
+    await navigator.clipboard.writeText(text);
+    setMessage(`${label}をコピーしました`);
+  }
+
+  return (
+    <details className="card mcpCard" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary className="cardHead">
+        <h2>MCP連携（Claude Code など）</h2>
+        <span className="cardHint">AIエージェントからタスク・予定・振り返りを操作</span>
+      </summary>
+
+      <p className="muted">
+        個人用トークンを発行すると、Claude Code などの MCP クライアントから DailyPilot のタスク追加・達成状況の更新・振り返りの保存などができるようになります。
+        トークンはアカウントのパスワードと同じように扱ってください。
+      </p>
+
+      <form className="inlineForm" onSubmit={issueToken}>
+        <input placeholder="用途（例: Claude Code）" value={name} onChange={(event) => setName(event.target.value)} />
+        <button className="primary">トークンを発行</button>
+      </form>
+
+      {issuedToken && (
+        <div className="issuedToken">
+          <p>トークンは<strong>この画面でしか表示されません</strong>。いまコピーして保管してください。</p>
+          <div className="copyRow">
+            <code>{issuedToken}</code>
+            <button className="ghost small" onClick={() => copy("トークン", issuedToken)}>コピー</button>
+          </div>
+        </div>
+      )}
+
+      <div className="mcpSetup">
+        <h3>Claude Code への登録コマンド</h3>
+        <div className="copyRow">
+          <code>{command}</code>
+          <button className="ghost small" onClick={() => copy("コマンド", command)}>コピー</button>
+        </div>
+        <p className="muted">claude.ai / Claude Desktop のカスタムコネクタは OAuth 認証が必要なため、現時点では未対応です。</p>
+      </div>
+
+      <div className="tokenList">
+        {tokens.length === 0 && <p className="empty">発行済みのトークンはありません</p>}
+        {tokens.map((token) => (
+          <div className="tokenRow" key={token.id}>
+            <div className="logText">
+              <strong>{token.name}</strong>
+              <span>{token.tokenPrefix}…・最終利用 {formatUnixTime(token.lastUsedAt)}</span>
+            </div>
+            <button className="ghost small" onClick={() => revokeToken(token)}>失効</button>
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 function App() {
   const [user, setUser] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
@@ -844,6 +864,8 @@ function App() {
           <ReflectionPanel date={date} reflection={summary.reflection} setMessage={setMessage} onMutate={mutate} />
           <ExportPanel targetExportText={targetExportText} actualExportText={actualExportText} setMessage={setMessage} />
         </div>
+
+        <McpPanel setMessage={setMessage} />
       </main>
 
       {message && <div className="toast">{message}</div>}
