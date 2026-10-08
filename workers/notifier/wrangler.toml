@@ -1,0 +1,16 @@
+# DailyPilot の通知用 Worker（Cron Trigger）です。デプロイ: npm run deploy:notifier
+name = "daily-pilot-notifier"
+main = "index.js"
+compatibility_date = "2026-05-09"
+# HTTP で呼ばれる必要はないため、*.workers.dev の URL は公開しません。
+workers_dev = false
+
+# 1分ごとに通知を判定します（1日1,440回。Workers 無料枠の 10万リクエスト/日 に十分収まります）。
+[triggers]
+crons = ["* * * * *"]
+
+# Pages 側（ルートの wrangler.toml）と同じ D1 を参照します。
+[[d1_databases]]
+binding = "DB"
+database_name = "daily-pilot"
+database_id = "8b4fe778-8d40-4796-8da3-48e5ac2c183b"

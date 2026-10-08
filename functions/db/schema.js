@@ -166,3 +166,47 @@ export const oauthTokens = sqliteTable("oauth_tokens", {
   lastUsedAt: integer("last_used_at"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+// 通知を受け取る端末（ブラウザの PushSubscription）。p256dh / auth はペイロード暗号化に使う公開情報です。
+export const pushSubscriptions = sqliteTable("push_subscriptions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  endpoint: text("endpoint").notNull().unique(),
+  p256dh: text("p256dh").notNull(),
+  auth: text("auth").notNull(),
+  label: text("label"),
+  lastSuccessAt: integer("last_success_at"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+// 通知の種類ごとのオン/オフと時刻（日本時間の HH:MM）。
+export const notificationSettings = sqliteTable("notification_settings", {
+  userId: integer("user_id").primaryKey(),
+  scheduleReminderEnabled: integer("schedule_reminder_enabled", { mode: "boolean" }).notNull().default(true),
+  scheduleLeadMinutes: integer("schedule_lead_minutes").notNull().default(10),
+  timerNudgeEnabled: integer("timer_nudge_enabled", { mode: "boolean" }).notNull().default(true),
+  morningEnabled: integer("morning_enabled", { mode: "boolean" }).notNull().default(true),
+  morningTime: text("morning_time").notNull().default("08:00"),
+  eveningEnabled: integer("evening_enabled", { mode: "boolean" }).notNull().default(true),
+  eveningTime: text("evening_time").notNull().default("21:00"),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+// 指定時刻に送るリマインダー。remind_at / sent_at は UNIX 秒です。
+export const reminders = sqliteTable("reminders", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  message: text("message").notNull(),
+  remindAt: integer("remind_at").notNull(),
+  sentAt: integer("sent_at"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+// 同じ通知を二重に送らないための送信記録。
+export const notificationLog = sqliteTable("notification_log", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  kind: text("kind").notNull(),
+  refKey: text("ref_key").notNull(),
+  createdAt: integer("created_at").notNull(),
+}, (table) => ({ userKindRef: uniqueIndex("notification_log_user_kind_ref_unique").on(table.userId, table.kind, table.refKey) }));

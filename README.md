@@ -222,6 +222,51 @@ MCP / OAuth 用のテーブルを追加しているため、デプロイ前に�
 npm run db:migrate:prod
 ```
 
+## スマホ通知（Web Push）
+
+アプリを閉じていても、スマホに次の通知が届きます（「スマホ通知」パネルで種類ごとにオン/オフ・時刻を設定できます）。
+
+- 予定の開始前（既定: 10分前）
+- 予定が始まって5分たっても実績タイマーが動いていないとき
+- 朝の計画リマインド（既定: 8:00。タスク未登録の日のみ）
+- 夜の振り返りリマインド（既定: 21:00。振り返り未保存の日のみ）
+- リマインダー（画面、または Claude に MCP の `create_reminder` で登録）
+
+Android は Chrome でそのまま使えます。iPhone / iPad は iOS 16.4 以降で、Safari の共有ボタンから「ホーム画面に追加」し、ホーム画面の DailyPilot を開いてから「この端末で通知を受け取る」を押してください。
+
+### セットアップ
+
+1. VAPID 鍵を生成します。
+
+```bash
+node scripts/generate-vapid-keys.mjs
+```
+
+2. 出力された `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT`（`mailto:あなたのメール`）を、Pages と通知用 Worker の両方に設定します。
+
+```bash
+wrangler pages secret put VAPID_PUBLIC_KEY
+wrangler pages secret put VAPID_PRIVATE_KEY
+wrangler pages secret put VAPID_SUBJECT
+wrangler secret put VAPID_PUBLIC_KEY --config workers/notifier/wrangler.toml
+wrangler secret put VAPID_PRIVATE_KEY --config workers/notifier/wrangler.toml
+wrangler secret put VAPID_SUBJECT --config workers/notifier/wrangler.toml
+```
+
+3. マイグレーションを適用し、通知用 Worker（1分ごとの Cron Trigger）をデプロイします。
+
+```bash
+npm run db:migrate:prod
+npm run deploy:notifier
+```
+
+### 仕組みと料金
+
+- Cloudflare Pages には定期実行がないため、`workers/notifier` の小さな Worker が Cron Trigger で1分ごとに `functions/notifications/scheduler.js` を実行し、送るべき通知を判定します（1日1,440回で、Workers 無料枠に収まります）。
+- 送信は Web Push（RFC 8291 の暗号化 + RFC 8292 の VAPID 署名）を Web Crypto で実装しており、外部サービスは使いません。
+- 同じ通知は `notification_log` で1回だけ送ります。無効になった端末（404 / 410）は自動で削除します。
+- 鍵を変えると既存の端末登録は使えなくなるため、各端末で通知を登録し直してください。
+
 ## Google OAuth / Googleカレンダー設定手順
 
 ### 1. Google Cloud Console でプロジェクトを作成する
