@@ -1,7 +1,9 @@
 import { drizzle } from "drizzle-orm/d1";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, between, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { ToolInputError, compactDaySummary, exportTexts, handleMcpRequest } from "../mcp/server.js";
 import {
   actualLogs,
+  apiTokens,
   calendarAccounts,
   calendarSyncs,
   days,
@@ -110,6 +112,33 @@ async function currentUser(env, request) {
   const session = await appDb.select().from(sessions).where(and(eq(sessions.id, sessionId), sql`${sessions.expiresAt} > ${now}`)).get();
   if (!session) return null;
   return appDb.select({ id: users.id, email: users.email, name: users.name }).from(users).where(eq(users.id, session.userId)).get();
+}
+
+// ===== MCP 用の個人アクセストークン =====
+// トークンは発行時に一度だけ表示し、DBには SHA-256 ハッシュだけを保存します。
+const API_TOKEN_PREFIX = "dpk_";
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function userFromBearerToken(env, request) {
+  const match = (request.headers.get("authorization") || "").match(/^Bearer\s+(\S+)$/i);
+  if (!match || !match[1].startsWith(API_TOKEN_PREFIX)) return null;
+  const appDb = db(env);
+  const token = await appDb.select().from(apiTokens).where(eq(apiTokens.tokenHash, await sha256Hex(match[1]))).get();
+  if (!token) return null;
+  // 最終利用時刻は5分に1回だけ更新し、D1 の書き込み回数を抑えます。
+  const now = Math.floor(Date.now() / 1000);
+  if (!token.lastUsedAt || now - token.lastUsedAt > 300) {
+    await appDb.update(apiTokens).set({ lastUsedAt: now }).where(eq(apiTokens.id, token.id)).run();
+  }
+  return appDb.select({ id: users.id, email: users.email, name: users.name }).from(users).where(eq(users.id, token.userId)).get();
+}
+
+async function listApiTokens(appDb, userId) {
+  return appDb.select({ id: apiTokens.id, name: apiTokens.name, tokenPrefix: apiTokens.tokenPrefix, lastUsedAt: apiTokens.lastUsedAt, createdAt: apiTokens.createdAt }).from(apiTokens).where(eq(apiTokens.userId, userId)).orderBy(desc(apiTokens.id)).all();
 }
 
 async function requireUser(env, request) {
@@ -380,6 +409,205 @@ async function getDaySummary(env, request, userId, date) {
   return { day, tasks: taskRows, schedule: scheduleRows, actualLogs: logRows, reflection: reflection || { achievementRate, reason: "", improvement: "", goodPoints: "", tomorrowNotes: "" }, googleSync: sync };
 }
 
+// ===== 日次データの更新処理（REST API と MCP で共通利用） =====
+
+function normalizeTaskPriority(priority) {
+  return ["S", "A", "B"].includes(priority) ? priority : null;
+}
+
+async function createTask(appDb, userId, { date, title, priority }) {
+  const day = await ensureDay(appDb, userId, date);
+  const [max] = await appDb.select({ next: sql`COALESCE(MAX(${tasks.sortOrder}), 0) + 1` }).from(tasks).where(and(eq(tasks.userId, userId), eq(tasks.dayId, day.id), eq(tasks.priority, priority))).all();
+  return appDb.insert(tasks).values({ dayId: day.id, userId, title, priority, status: "planned", sortOrder: Number(max?.next || 1) }).returning().get();
+}
+
+async function updateTask(appDb, userId, id, { title, priority, status }) {
+  return appDb.update(tasks).set({ title, priority, status, updatedAt: sql`CURRENT_TIMESTAMP` }).where(and(eq(tasks.userId, userId), eq(tasks.id, id))).returning().get();
+}
+
+async function createScheduleBlock(appDb, userId, schedule) {
+  const day = await ensureDay(appDb, userId, schedule.date);
+  return appDb.insert(scheduleBlocks).values({ dayId: day.id, userId, title: schedule.title, startTime: schedule.startTime, endTime: schedule.endTime, source: schedule.source, externalEventId: schedule.externalEventId, sortOrder: 0 }).returning().get();
+}
+
+async function createActualLog(appDb, userId, log) {
+  const day = await ensureDay(appDb, userId, log.date);
+  const startedAt = dateTimeToIso(log.date, log.startTime);
+  const endedAt = dateTimeToIso(log.date, log.endTime);
+  return appDb.insert(actualLogs).values({ dayId: day.id, userId, title: log.title, startedAt, endedAt, durationMinutes: minutesBetween(startedAt, endedAt) }).returning().get();
+}
+
+async function startTimer(appDb, userId, { date, title, scheduleBlockId }) {
+  const day = await ensureDay(appDb, userId, date);
+  return appDb.insert(actualLogs).values({ dayId: day.id, userId, scheduleBlockId: scheduleBlockId || null, title, startedAt: new Date().toISOString() }).returning().get();
+}
+
+async function stopTimer(appDb, userId, logId) {
+  const endedAt = new Date();
+  const log = await appDb.select().from(actualLogs).where(and(eq(actualLogs.userId, userId), eq(actualLogs.id, logId))).get();
+  if (!log) return null;
+  const durationMinutes = Math.max(1, Math.round((endedAt.getTime() - new Date(log.startedAt).getTime()) / 60000));
+  return appDb.update(actualLogs).set({ endedAt: endedAt.toISOString(), durationMinutes }).where(and(eq(actualLogs.userId, userId), eq(actualLogs.id, logId))).returning().get();
+}
+
+async function saveReflection(appDb, userId, date, values) {
+  const day = await ensureDay(appDb, userId, date);
+  const fields = { achievementRate: values.achievementRate, reason: values.reason, improvement: values.improvement, goodPoints: values.goodPoints, tomorrowNotes: values.tomorrowNotes };
+  await appDb.insert(reflections).values({ dayId: day.id, userId, ...fields }).onConflictDoUpdate({ target: [reflections.userId, reflections.dayId], set: { ...fields, updatedAt: sql`CURRENT_TIMESTAMP` } }).run();
+}
+
+// ===== MCP ツールの実処理 =====
+// ログイン中ユーザーに紐づけた操作を返します。入力ミスは ToolInputError としてモデルに伝えます。
+
+function todayInTokyo() {
+  return new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" });
+}
+
+function resolveDate(date) {
+  if (date === undefined || date === null || date === "") return todayInTokyo();
+  if (!isValidDate(date)) throw new ToolInputError("date は YYYY-MM-DD 形式で指定してください");
+  return date;
+}
+
+function requireId(value, name) {
+  const id = Number(value);
+  if (!Number.isInteger(id) || id <= 0) throw new ToolInputError(`${name} を正の整数で指定してください`);
+  return id;
+}
+
+function requireText(value, name) {
+  const text = String(value ?? "").trim();
+  if (!text) throw new ToolInputError(`${name} を指定してください`);
+  return text;
+}
+
+function mcpOps(env, request, user) {
+  const appDb = db(env);
+  const userId = user.id;
+  const summaryOf = (date) => getDaySummary(env, request, userId, date);
+  const dayResult = async (date, extra) => ({ ...extra, day: compactDaySummary(await summaryOf(date)) });
+
+  return {
+    async getDay(date) {
+      return compactDaySummary(await summaryOf(resolveDate(date)));
+    },
+
+    async listDays(from, to) {
+      if (!isValidDate(from) || !isValidDate(to)) throw new ToolInputError("from / to は YYYY-MM-DD 形式で指定してください");
+      if (from > to) throw new ToolInputError("from は to 以前の日付にしてください");
+      if (addDays(from, 30) < to) throw new ToolInputError("期間は31日以内にしてください");
+      const dayRows = await appDb.select().from(days).where(and(eq(days.userId, userId), between(days.date, from, to))).orderBy(days.date).all();
+      if (!dayRows.length) return { from, to, days: [] };
+      const dayIds = dayRows.map((day) => day.id);
+      const taskRows = await appDb.select().from(tasks).where(and(eq(tasks.userId, userId), inArray(tasks.dayId, dayIds))).orderBy(tasks.priority, tasks.sortOrder, tasks.id).all();
+      const logRows = await appDb.select().from(actualLogs).where(and(eq(actualLogs.userId, userId), inArray(actualLogs.dayId, dayIds))).all();
+      const reflectionRows = await appDb.select().from(reflections).where(and(eq(reflections.userId, userId), inArray(reflections.dayId, dayIds))).all();
+      return {
+        from,
+        to,
+        days: dayRows.map((day) => {
+          const dayTasks = taskRows.filter((task) => task.dayId === day.id);
+          const reflection = reflectionRows.find((row) => row.dayId === day.id);
+          return {
+            date: day.date,
+            achievementRate: reflection?.achievementRate ?? calculateAchievement(dayTasks),
+            tasks: dayTasks.map((task) => ({ priority: task.priority, title: task.title, status: task.status })),
+            loggedMinutes: logRows.filter((log) => log.dayId === day.id).reduce((sum, log) => sum + (log.durationMinutes || 0), 0),
+            reflection: reflection ? { reason: reflection.reason, improvement: reflection.improvement, goodPoints: reflection.goodPoints, tomorrowNotes: reflection.tomorrowNotes } : null,
+          };
+        }),
+      };
+    },
+
+    async getExportText(date) {
+      return exportTexts(await summaryOf(resolveDate(date)));
+    },
+
+    async addTask(args) {
+      const date = resolveDate(args.date);
+      const priority = args.priority === undefined ? "A" : normalizeTaskPriority(args.priority);
+      if (!priority) throw new ToolInputError("priority は S / A / B のいずれかです");
+      const task = await createTask(appDb, userId, { date, title: requireText(args.title, "title"), priority });
+      return dayResult(date, { created: { id: task.id, priority: task.priority, title: task.title } });
+    },
+
+    async updateTask(args) {
+      const id = requireId(args.task_id, "task_id");
+      if (args.priority !== undefined && !normalizeTaskPriority(args.priority)) throw new ToolInputError("priority は S / A / B のいずれかです");
+      if (args.status !== undefined && !["planned", "done", "partial", "missed"].includes(args.status)) throw new ToolInputError("status は planned / done / partial / missed のいずれかです");
+      const title = args.title === undefined ? undefined : requireText(args.title, "title");
+      if (title === undefined && args.priority === undefined && args.status === undefined) throw new ToolInputError("title / priority / status のいずれかを指定してください");
+      const task = await updateTask(appDb, userId, id, { title, priority: args.priority, status: args.status });
+      if (!task) throw new ToolInputError(`タスク ${id} が見つかりません`);
+      return { updated: { id: task.id, priority: task.priority, title: task.title, status: task.status } };
+    },
+
+    async deleteTask(taskId) {
+      const id = requireId(taskId, "task_id");
+      const task = await appDb.delete(tasks).where(and(eq(tasks.userId, userId), eq(tasks.id, id))).returning().get();
+      if (!task) throw new ToolInputError(`タスク ${id} が見つかりません`);
+      return { deleted: { id: task.id, title: task.title } };
+    },
+
+    async addSchedule(args) {
+      const schedule = normalizeScheduleBody({ date: resolveDate(args.date), title: args.title, startTime: args.start_time, endTime: args.end_time });
+      const validationError = validateScheduleInput(schedule);
+      if (validationError) throw new ToolInputError(validationError);
+      const block = await createScheduleBlock(appDb, userId, schedule);
+      return dayResult(schedule.date, { created: { id: block.id, startTime: block.startTime, endTime: block.endTime, title: block.title } });
+    },
+
+    async deleteSchedule(scheduleId) {
+      const id = requireId(scheduleId, "schedule_id");
+      const block = await appDb.delete(scheduleBlocks).where(and(eq(scheduleBlocks.userId, userId), eq(scheduleBlocks.id, id))).returning().get();
+      if (!block) throw new ToolInputError(`予定 ${id} が見つかりません`);
+      return { deleted: { id: block.id, title: block.title } };
+    },
+
+    async startTimer(args) {
+      const date = resolveDate(args.date);
+      const log = await startTimer(appDb, userId, { date, title: requireText(args.title, "title") });
+      return { started: { id: log.id, title: log.title, startedAt: log.startedAt } };
+    },
+
+    async stopTimer(logId) {
+      let id = logId === undefined || logId === null ? null : requireId(logId, "log_id");
+      if (!id) {
+        const running = await appDb.select().from(actualLogs).where(and(eq(actualLogs.userId, userId), isNull(actualLogs.endedAt))).orderBy(desc(actualLogs.startedAt)).get();
+        if (!running) throw new ToolInputError("計測中の実績タイマーはありません");
+        id = running.id;
+      }
+      const log = await stopTimer(appDb, userId, id);
+      if (!log) throw new ToolInputError(`実績ログ ${id} が見つかりません`);
+      return { stopped: { id: log.id, title: log.title, durationMinutes: log.durationMinutes } };
+    },
+
+    async addActualLog(args) {
+      const log = normalizeActualLogBody({ date: resolveDate(args.date), title: args.title, startTime: args.start_time, endTime: args.end_time });
+      const validationError = validateActualLogInput(log);
+      if (validationError) throw new ToolInputError(validationError);
+      const created = await createActualLog(appDb, userId, log);
+      return dayResult(log.date, { created: { id: created.id, title: created.title, durationMinutes: created.durationMinutes } });
+    },
+
+    async saveReflection(args) {
+      const date = resolveDate(args.date);
+      const current = (await summaryOf(date)).reflection;
+      const rate = args.achievement_rate === undefined ? current.achievementRate : Number(args.achievement_rate);
+      if (!Number.isInteger(rate) || rate < 0 || rate > 100) throw new ToolInputError("achievement_rate は 0〜100 の整数で指定してください");
+      const pick = (value, fallback) => (value === undefined ? fallback : String(value));
+      await saveReflection(appDb, userId, date, {
+        achievementRate: rate,
+        reason: pick(args.reason, current.reason),
+        improvement: pick(args.improvement, current.improvement),
+        goodPoints: pick(args.good_points, current.goodPoints),
+        tomorrowNotes: pick(args.tomorrow_notes, current.tomorrowNotes),
+      });
+      return dayResult(date, { saved: true });
+    },
+  };
+}
+
 // ===== 生成AI（Cloudflare Workers AI） =====
 // wrangler.toml の [ai] binding = "AI" を通じて呼び出します。APIキーは不要です。
 const DEFAULT_AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
@@ -524,8 +752,34 @@ async function handleApi({ request, env }) {
       return json({ ok: true }, { headers });
     }
 
+    // MCP エンドポイント。Cookie ではなく Authorization: Bearer の個人アクセストークンで認証します。
+    if (path === "/mcp") {
+      const mcpUser = await userFromBearerToken(env, request);
+      return handleMcpRequest(request, mcpUser ? mcpOps(env, request, mcpUser) : null);
+    }
+
     const user = await requireUser(env, request).catch((response) => response);
     if (user instanceof Response) return user;
+
+    // MCP トークン一覧
+    if (request.method === "GET" && path === "/mcp-tokens") {
+      return json({ tokens: await listApiTokens(appDb, user.id) });
+    }
+
+    // MCP トークン発行。トークン本体はこのレスポンスでしか返しません。
+    if (request.method === "POST" && path === "/mcp-tokens") {
+      const body = await request.json();
+      const name = String(body.name || "").trim().slice(0, 60) || "MCP";
+      const token = `${API_TOKEN_PREFIX}${randomId(32)}`;
+      await appDb.insert(apiTokens).values({ userId: user.id, name, tokenHash: await sha256Hex(token), tokenPrefix: token.slice(0, API_TOKEN_PREFIX.length + 6) }).run();
+      return json({ token, tokens: await listApiTokens(appDb, user.id) });
+    }
+
+    // MCP トークン失効
+    if (request.method === "DELETE" && path.startsWith("/mcp-tokens/")) {
+      await appDb.delete(apiTokens).where(and(eq(apiTokens.userId, user.id), eq(apiTokens.id, Number(path.split("/")[2])))).run();
+      return json({ tokens: await listApiTokens(appDb, user.id) });
+    }
 
     // 日次サマリー取得。ここでGoogleカレンダー自動同期も実行します。
     if (request.method === "GET" && path.startsWith("/days/")) {
@@ -538,16 +792,14 @@ async function handleApi({ request, env }) {
     if (request.method === "POST" && path === "/tasks") {
       const body = await request.json();
       if (!body.title?.trim()) return badRequest("Task title is required");
-      const day = await ensureDay(appDb, user.id, body.date);
-      const [max] = await appDb.select({ next: sql`COALESCE(MAX(${tasks.sortOrder}), 0) + 1` }).from(tasks).where(and(eq(tasks.userId, user.id), eq(tasks.dayId, day.id), eq(tasks.priority, body.priority))).all();
-      await appDb.insert(tasks).values({ dayId: day.id, userId: user.id, title: body.title.trim(), priority: body.priority, status: "planned", sortOrder: Number(max?.next || 1) }).run();
+      await createTask(appDb, user.id, { date: body.date, title: body.title.trim(), priority: body.priority });
       return json(await getDaySummary(env, request, user.id, body.date));
     }
 
     if (request.method === "PATCH" && path.startsWith("/tasks/")) {
       const id = Number(path.split("/")[2]);
       const body = await request.json();
-      await appDb.update(tasks).set({ title: body.title, priority: body.priority, status: body.status, updatedAt: sql`CURRENT_TIMESTAMP` }).where(and(eq(tasks.userId, user.id), eq(tasks.id, id))).run();
+      await updateTask(appDb, user.id, id, body);
       return json({ ok: true });
     }
 
@@ -561,8 +813,7 @@ async function handleApi({ request, env }) {
       const schedule = normalizeScheduleBody(await request.json());
       const validationError = validateScheduleInput(schedule);
       if (validationError) return badRequest(validationError);
-      const day = await ensureDay(appDb, user.id, schedule.date);
-      await appDb.insert(scheduleBlocks).values({ dayId: day.id, userId: user.id, title: schedule.title, startTime: schedule.startTime, endTime: schedule.endTime, source: schedule.source, externalEventId: schedule.externalEventId, sortOrder: 0 }).run();
+      await createScheduleBlock(appDb, user.id, schedule);
       return json(await getDaySummary(env, request, user.id, schedule.date));
     }
 
@@ -583,10 +834,7 @@ async function handleApi({ request, env }) {
       const log = normalizeActualLogBody(await request.json());
       const validationError = validateActualLogInput(log);
       if (validationError) return badRequest(validationError);
-      const day = await ensureDay(appDb, user.id, log.date);
-      const startedAt = dateTimeToIso(log.date, log.startTime);
-      const endedAt = dateTimeToIso(log.date, log.endTime);
-      await appDb.insert(actualLogs).values({ dayId: day.id, userId: user.id, title: log.title, startedAt, endedAt, durationMinutes: minutesBetween(startedAt, endedAt) }).run();
+      await createActualLog(appDb, user.id, log);
       return json(await getDaySummary(env, request, user.id, log.date));
     }
 
@@ -609,17 +857,13 @@ async function handleApi({ request, env }) {
     // 実績タイマー開始
     if (request.method === "POST" && path === "/timer/start") {
       const body = await request.json();
-      const day = await ensureDay(appDb, user.id, body.date);
-      await appDb.insert(actualLogs).values({ dayId: day.id, userId: user.id, scheduleBlockId: body.scheduleBlockId || null, title: body.title, startedAt: new Date().toISOString() }).run();
+      await startTimer(appDb, user.id, body);
       return json(await getDaySummary(env, request, user.id, body.date));
     }
 
     if (request.method === "POST" && path === "/timer/stop") {
       const body = await request.json();
-      const endedAt = new Date();
-      const log = await appDb.select().from(actualLogs).where(and(eq(actualLogs.userId, user.id), eq(actualLogs.id, body.logId))).get();
-      const durationMinutes = log ? Math.max(1, Math.round((endedAt.getTime() - new Date(log.startedAt).getTime()) / 60000)) : null;
-      await appDb.update(actualLogs).set({ endedAt: endedAt.toISOString(), durationMinutes }).where(and(eq(actualLogs.userId, user.id), eq(actualLogs.id, body.logId))).run();
+      await stopTimer(appDb, user.id, body.logId);
       return json({ ok: true });
     }
 
@@ -627,8 +871,7 @@ async function handleApi({ request, env }) {
     if (request.method === "PUT" && path.startsWith("/reflections/")) {
       const date = decodeURIComponent(path.split("/")[2] || "");
       const body = await request.json();
-      const day = await ensureDay(appDb, user.id, date);
-      await appDb.insert(reflections).values({ dayId: day.id, userId: user.id, achievementRate: body.achievementRate, reason: body.reason, improvement: body.improvement, goodPoints: body.goodPoints, tomorrowNotes: body.tomorrowNotes }).onConflictDoUpdate({ target: [reflections.userId, reflections.dayId], set: { achievementRate: body.achievementRate, reason: body.reason, improvement: body.improvement, goodPoints: body.goodPoints, tomorrowNotes: body.tomorrowNotes, updatedAt: sql`CURRENT_TIMESTAMP` } }).run();
+      await saveReflection(appDb, user.id, date, body);
       return json(await getDaySummary(env, request, user.id, date));
     }
 

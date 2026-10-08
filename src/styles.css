@@ -554,6 +554,53 @@ button.small { padding: 5px 10px; font-size: 13px; }
   line-height: 1.8;
 }
 
+/* ---------- MCP連携 ---------- */
+.mcpCard > summary { cursor: pointer; list-style: none; margin-bottom: 0; }
+.mcpCard > summary::-webkit-details-marker { display: none; }
+.mcpCard > summary h2::before { content: "▸"; display: inline-block; width: 16px; color: var(--text-3); transition: transform 0.15s; }
+.mcpCard[open] > summary { margin-bottom: 14px; }
+.mcpCard[open] > summary h2::before { transform: rotate(90deg); }
+
+.mcpCard h3 { margin: 0 0 8px; font-size: 13px; font-weight: 700; color: var(--text-2); }
+
+.copyRow { display: flex; align-items: flex-start; gap: 8px; }
+.copyRow code {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.issuedToken {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid #f5d38a;
+  background: var(--warn-soft);
+}
+.issuedToken p { margin: 0 0 8px; font-size: 13px; color: var(--warn); }
+.issuedToken code { background: var(--surface); }
+
+.mcpSetup { margin-bottom: 14px; }
+.mcpSetup .muted { margin: 8px 0 0; font-size: 12px; }
+
+.tokenList { display: grid; gap: 8px; }
+.tokenRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
 /* ---------- トースト ---------- */
 .toast {
   position: fixed;

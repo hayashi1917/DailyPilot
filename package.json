@@ -7,7 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "deploy": "wrangler pages deploy dist --project-name daily-pilot",
-    "check": "node --check functions/api/[[path]].js && node --check functions/db/schema.js",
+    "check": "node --check functions/api/[[path]].js && node --check functions/db/schema.js && node --check functions/mcp/server.js && node --check shared/exportText.js",
     "db:migrate:local": "wrangler d1 migrations apply daily-pilot --local",
     "db:migrate:prod": "wrangler d1 migrations apply daily-pilot --remote"
   },
