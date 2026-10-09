@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import {
@@ -11,8 +11,8 @@ import {
 } from "../shared/exportText.js";
 
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
-// toISOString() は UTC になり、日本時間の0〜9時に前日扱いになるため、ローカル日付で求めます。
-const TODAY = new Date().toLocaleDateString("sv-SE");
+// 予定や実績はすべて日本時間で扱うため、端末のタイムゾーンに関係なく日本時間の日付にします。
+const TODAY = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" });
 // claude.ai などから OAuth 連携で開かれたときの連携リクエストID（同意画面を表示します）。
 const OAUTH_REQUEST_ID = new URLSearchParams(window.location.search).get("oauth_request");
 
@@ -303,27 +303,31 @@ function GoogleSyncBar({ date, googleSync, setMessage, onMutate }) {
   return (
     <div className="googleBar">
       <div className="googleBarMain">
-        <span className={`syncDot ${googleSync?.connected ? "on" : "off"}`}>
-          Googleカレンダー{googleSync?.connected ? "と同期中" : "未接続"}
+        <span className={`syncDot ${googleSync?.connected && !googleSync?.error ? "on" : "off"}`}>
+          Googleカレンダー{!googleSync?.connected ? "未接続" : googleSync?.error ? "の同期エラー" : "と同期中"}
         </span>
         <div className="actions">
           {googleSync?.connected ? (
-            <button
-              className="ghost small"
-              title="対象日を開くたびに一定間隔で自動同期します。今すぐ反映したい場合に押してください。"
-              onClick={() => onMutate(
-                api("/google/sync", { method: "POST", body: JSON.stringify({ date, force: true }) }),
-                "Googleカレンダーを同期しました",
-              )}
-            >
-              今すぐ同期
-            </button>
+            <>
+              <button
+                className="ghost small"
+                title="対象日を開くたびに一定間隔で自動同期します。今すぐ反映したい場合に押してください。"
+                onClick={() => onMutate(
+                  api("/google/sync", { method: "POST", body: JSON.stringify({ date, force: true }) }),
+                  "Googleカレンダーを同期しました",
+                )}
+              >
+                今すぐ同期
+              </button>
+              {/* 連携が取り消された・期限切れなどで同期できない場合に、OAuth をやり直せるようにします。 */}
+              <button className="linkButton small" title="同期に失敗し続ける場合は、Googleとの連携をやり直してください。" onClick={connectGoogle}>再連携</button>
+            </>
           ) : (
             <button className="ghost small" onClick={connectGoogle}>Google連携</button>
           )}
         </div>
       </div>
-      {googleConfig?.redirectUri && !googleSync?.connected && (
+      {googleConfig?.redirectUri && (!googleSync?.connected || googleSync?.error) && (
         <details className="oauthHint">
           <summary>redirect_uri_mismatch が出る場合</summary>
           <p>Google Cloud Console の「承認済みのリダイレクト URI」に、以下を完全一致で登録してください。</p>
@@ -671,7 +675,8 @@ function formatReminderTime(unix) {
 
 function defaultReminderDraft() {
   const next = new Date(Date.now() + 60 * 60 * 1000);
-  return { message: "", date: next.toLocaleDateString("sv-SE"), time: `${String(next.getHours()).padStart(2, "0")}:00` };
+  const hour = next.toLocaleString("en-US", { hour: "2-digit", hourCycle: "h23", timeZone: "Asia/Tokyo" });
+  return { message: "", date: next.toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" }), time: `${hour}:00` };
 }
 
 function NotificationPanel({ setMessage }) {
@@ -1112,6 +1117,9 @@ function App() {
   const [summary, setSummary] = useState(null);
   const [message, setMessage] = useState("");
   const [currentTime, setCurrentTime] = useState(() => new Date());
+  // 非同期の保存や読み込みが終わった時点で「いま表示している日付」を参照するための値です。
+  const dateRef = useRef(date);
+  dateRef.current = date;
 
   // 初回表示時にセッションCookieからログイン状態を復元します。
   useEffect(() => {
@@ -1138,8 +1146,11 @@ function App() {
     return () => window.clearTimeout(timerId);
   }, [message]);
 
+  // 読み込み中に別の日付へ切り替えた場合は、古い日付のレスポンスを捨てて表示を上書きしないようにします。
   async function loadSummary() {
-    const data = await api(`/days/${date}`);
+    const requestedDate = dateRef.current;
+    const data = await api(`/days/${requestedDate}`);
+    if (requestedDate !== dateRef.current) return;
     setSummary(data);
 
     if (data.googleSync?.synced) setMessage("Googleカレンダーを自動同期しました");
@@ -1155,7 +1166,8 @@ function App() {
   async function mutate(promise, successMessage) {
     try {
       const data = await promise;
-      if (data?.day) setSummary(data);
+      // 保存した日と表示中の日が違う場合（保存中に日付を切り替えた場合など）は、表示中の日を読み込み直します。
+      if (data?.day && data.day.date === dateRef.current) setSummary(data);
       else await loadSummary();
       if (successMessage) setMessage(successMessage);
     } catch (error) {

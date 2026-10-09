@@ -283,7 +283,8 @@ async function authenticateClient(env, request, params) {
   return client;
 }
 
-async function issueTokens(env, { userId, clientId, scope, resource, replaceTokenId = null }) {
+// rotate を渡すとリフレッシュ時のローテーションとして、古いリフレッシュトークンのハッシュが一致する場合だけ上書きします。
+async function issueTokens(env, { userId, clientId, scope, resource, rotate = null }) {
   const accessToken = `${ACCESS_TOKEN_PREFIX}${randomId(32)}`;
   const refreshToken = `${REFRESH_TOKEN_PREFIX}${randomId(32)}`;
   const values = {
@@ -293,8 +294,13 @@ async function issueTokens(env, { userId, clientId, scope, resource, replaceToke
     refreshExpiresAt: now() + REFRESH_TOKEN_TTL_SECONDS,
   };
   const appDb = db(env);
-  if (replaceTokenId) {
-    await appDb.update(oauthTokens).set(values).where(eq(oauthTokens.id, replaceTokenId)).run();
+  if (rotate) {
+    // 同じリフレッシュトークンで同時にリクエストされても、成功するのは最初の1件だけにします（compare-and-swap）。
+    const rotated = await appDb.update(oauthTokens).set(values)
+      .where(and(eq(oauthTokens.id, rotate.tokenId), eq(oauthTokens.refreshTokenHash, rotate.previousRefreshTokenHash)))
+      .returning({ id: oauthTokens.id })
+      .get();
+    if (!rotated) return oauthError("invalid_grant", "リフレッシュトークンが無効か期限切れです");
   } else {
     await appDb.insert(oauthTokens).values({ userId, clientId, scope, resource, ...values }).run();
   }
@@ -312,9 +318,9 @@ export async function exchangeToken(env, request) {
     const code = params.get("code");
     const verifier = params.get("code_verifier");
     if (!code || !verifier) return oauthError("invalid_request", "code と code_verifier が必要です");
-    const authorization = await appDb.select().from(oauthAuthorizations).where(eq(oauthAuthorizations.codeHash, await sha256Hex(code))).get();
-    // 認可コードは一度しか使えないよう、検証前に削除します。
-    if (authorization) await appDb.delete(oauthAuthorizations).where(eq(oauthAuthorizations.id, authorization.id)).run();
+    // 認可コードは一度しか使えないよう、検証前に「削除して取り出す」を1回の操作で行います。
+    // 同じコードで同時にリクエストされても、行を取り出せるのは1件だけです。
+    const authorization = await appDb.delete(oauthAuthorizations).where(eq(oauthAuthorizations.codeHash, await sha256Hex(code))).returning().get();
     if (!authorization || authorization.clientId !== client.id || !authorization.userId || authorization.expiresAt < now()) {
       return oauthError("invalid_grant", "認可コードが無効か期限切れです");
     }
@@ -327,10 +333,11 @@ export async function exchangeToken(env, request) {
   if (grantType === "refresh_token") {
     const refreshToken = params.get("refresh_token");
     if (!refreshToken) return oauthError("invalid_request", "refresh_token が必要です");
-    const token = await appDb.select().from(oauthTokens).where(and(eq(oauthTokens.refreshTokenHash, await sha256Hex(refreshToken)), eq(oauthTokens.clientId, client.id), gt(oauthTokens.refreshExpiresAt, now()))).get();
+    const previousRefreshTokenHash = await sha256Hex(refreshToken);
+    const token = await appDb.select().from(oauthTokens).where(and(eq(oauthTokens.refreshTokenHash, previousRefreshTokenHash), eq(oauthTokens.clientId, client.id), gt(oauthTokens.refreshExpiresAt, now()))).get();
     if (!token) return oauthError("invalid_grant", "リフレッシュトークンが無効か期限切れです");
     // リフレッシュトークンはローテーションし、古いものは使えなくします。
-    return issueTokens(env, { userId: token.userId, clientId: client.id, scope: token.scope, resource: token.resource, replaceTokenId: token.id });
+    return issueTokens(env, { userId: token.userId, clientId: client.id, scope: token.scope, resource: token.resource, rotate: { tokenId: token.id, previousRefreshTokenHash } });
   }
 
   return oauthError("unsupported_grant_type", "authorization_code と refresh_token のみ対応しています");

@@ -321,7 +321,8 @@ export async function handleMcpRequest(request, ops, { wwwAuthenticate }) {
   }
 
   // 通知（id なし）やクライアントからのレスポンスには本文なしの 202 を返します。
-  if (message.id === undefined || !message.method) return new Response(null, { status: 202 });
+  // ブラウザ型クライアントでも受け取れるよう、ここにも CORS ヘッダーを付けます。
+  if (message.id === undefined || !message.method) return new Response(null, { status: 202, headers: CORS_HEADERS });
 
   try {
     return jsonResponse(await handleMessage(message, ops));

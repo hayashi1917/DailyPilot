@@ -803,7 +803,8 @@ async function handleApi({ request, env }) {
     }
 
     // MCP エンドポイント。Cookie ではなく Authorization: Bearer（個人アクセストークン / OAuth）で認証します。
-    if (path === "/mcp") {
+    // 「https://host/api/mcp/」のように末尾にスラッシュを付けて登録された場合も同じエンドポイントとして扱います。
+    if (path === "/mcp" || path === "/mcp/") {
       if (request.method === "OPTIONS") return corsPreflight();
       const mcpUser = await userFromBearerToken(env, request);
       return handleMcpRequest(request, mcpUser ? mcpOps(env, request, mcpUser) : null, {
