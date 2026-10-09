@@ -1,0 +1,10 @@
+# Cloudflare Pages の静的ファイルに付けるヘッダーです。
+# OAuth の同意画面を他サイトの iframe に埋め込んで押させる攻撃（クリックジャッキング）を防ぎます。
+/*
+  X-Frame-Options: DENY
+  Content-Security-Policy: frame-ancestors 'none'
+  Referrer-Policy: strict-origin-when-cross-origin
+
+# Service Worker は更新がすぐ反映されるよう、キャッシュさせません。
+/sw.js
+  Cache-Control: no-cache

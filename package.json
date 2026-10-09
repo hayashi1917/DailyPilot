@@ -7,9 +7,10 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "deploy": "wrangler pages deploy dist --project-name daily-pilot",
-    "check": "node --check functions/api/[[path]].js && node --check functions/db/schema.js",
+    "check": "node --check functions/api/[[path]].js && node --check functions/db/schema.js && node --check functions/mcp/server.js && node --check functions/oauth/provider.js && node --check functions/lib/crypto.js && node --check \"functions/.well-known/[[path]].js\" && node --check shared/exportText.js && node --check functions/notifications/webpush.js && node --check functions/notifications/service.js && node --check functions/notifications/scheduler.js && node --check workers/notifier/index.js && node --check public/sw.js",
     "db:migrate:local": "wrangler d1 migrations apply daily-pilot --local",
-    "db:migrate:prod": "wrangler d1 migrations apply daily-pilot --remote"
+    "db:migrate:prod": "wrangler d1 migrations apply daily-pilot --remote",
+    "deploy:notifier": "wrangler deploy --config workers/notifier/wrangler.toml"
   },
   "dependencies": {
     "drizzle-orm": "latest",
